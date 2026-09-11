@@ -24,20 +24,21 @@ import sys
 import tempfile
 import time
 import traceback
-from typing import Any, Callable, Mapping
+from collections.abc import Callable, Mapping
+from typing import Any
 
 __all__ = [
+    "RESULT_ARTIFACT",
     "ROLES",
     "ROLE_TAGS",
-    "RESULT_ARTIFACT",
     "build_parser",
-    "load_json_arg",
-    "stable_hash",
-    "get_spark",
-    "to_pandas",
-    "run_tags",
     "dispatch",
+    "get_spark",
+    "load_json_arg",
     "main",
+    "run_tags",
+    "stable_hash",
+    "to_pandas",
 ]
 
 ROLES = ("materialize", "baseline", "train", "qa_phase0", "qa_phase1")
@@ -215,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         mlflow.set_tags(run_tags(args))
         try:
             result = dispatch(args)
-        except Exception as exc:  # noqa: BLE001 - the job must report, not crash silently
+        except Exception as exc:
             result = _failure_result(args, exc, time.time() - started)
             log_result(result, mlflow)
             mlflow.set_tag("amt.status", "failed")

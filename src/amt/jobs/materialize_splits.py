@@ -22,15 +22,16 @@ than in each job) is what makes candidate and baseline comparable.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 __all__ = [
     "SPLIT_TABLE_NAMES",
     "SplitPlan",
+    "materialize",
     "membership_hash",
     "plan_from_contract",
-    "materialize",
     "run",
 ]
 
@@ -289,7 +290,7 @@ def _materialize_local(
             "table": plan.table(name),
             "path": out_path,
             "delta_version": 0,
-            "row_count": int(len(frame)),
+            "row_count": len(frame),
             "membership_hash": membership_hash(frame[plan.user_col].tolist()),
         }
     return _result(contract, plan, refs, backend="local")

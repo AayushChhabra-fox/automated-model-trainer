@@ -15,20 +15,21 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 __all__ = [
     "HASHED_PATHS",
     "WheelError",
+    "build_wheel",
+    "ensure_wheel",
+    "remote_wheel_path",
     "repo_root",
     "source_tree_hash",
-    "build_wheel",
     "upload_bytes",
     "upload_wheel",
-    "remote_wheel_path",
     "wheel_exists",
-    "ensure_wheel",
 ]
 
 # Everything that can change what the job does.  Docs and tests are excluded
@@ -92,7 +93,7 @@ def build_wheel(root: str | os.PathLike[str] | None = None, out_dir: str | None 
     for cmd in commands:
         try:
             subprocess.run(cmd, cwd=str(base), check=True, capture_output=True)
-        except Exception as exc:  # noqa: BLE001 - try the next builder
+        except Exception as exc:
             last = exc
             continue
         wheels = sorted(dest.glob("*.whl"), key=lambda p: p.stat().st_mtime)
@@ -113,7 +114,7 @@ def upload_bytes(client: Any, remote_path: str, payload: bytes) -> str:
 
     try:
         client.files.upload(remote_path, io.BytesIO(payload), overwrite=True)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise WheelError(f"upload to {remote_path} failed: {exc}") from exc
     return remote_path
 

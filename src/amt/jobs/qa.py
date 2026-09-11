@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from amt.jobs.data.features import build_eval_frame
 from amt.jobs.data.loaders import SplitGuard
@@ -48,7 +49,7 @@ PHASE0_SPLITS = ("validation",)
 PHASE1_SPLITS = ("qa",)
 
 
-def Check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:  # noqa: N802
+def Check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
     """One phase-0 integrity check result."""
     return {"name": name, "passed": bool(passed), "detail": str(detail)}
 
@@ -334,7 +335,7 @@ def phase1(
         "primary_metric": settings["primary_metric"],
         "baseline_model_uri": str(baseline_uri),
         "candidate_model_uri": str(frozen.get("model_uri") or ""),
-        "n_qa_users": int(len(frame.histories)),
+        "n_qa_users": len(frame.histories),
         "splits_read": guard.reads,
         "status": "success",
         "error": None,

@@ -84,7 +84,9 @@ class LocalMockExecutor:
 
     # --- Executor protocol --------------------------------------------------------
     def materialize_splits(self, contract: EvaluationContract) -> SplitMaterialization:
-        self._check(contract)
+        # Materialization happens *before* HC3: the split references it returns are folded
+        # back into the contract, which changes its hash. The campaign's ground truth is
+        # pinned by the first call made under the frozen contract (run_baseline), not here.
         self.calls.append("materialize_splits")
 
         def ref(base: SplitRef, rows: int) -> SplitRef:

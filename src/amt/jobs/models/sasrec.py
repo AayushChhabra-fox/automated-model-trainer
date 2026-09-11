@@ -15,7 +15,8 @@ from __future__ import annotations
 import json
 import math
 import os
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -39,7 +40,7 @@ DEFAULTS: dict[str, Any] = {
     "seed": 42,
 }
 
-__all__ = ["FAMILY", "DEFAULTS", "SASRecModel", "fit", "load", "log_model", "resolve_cfg"]
+__all__ = ["DEFAULTS", "FAMILY", "SASRecModel", "fit", "load", "log_model", "resolve_cfg"]
 
 
 def resolve_cfg(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -69,7 +70,7 @@ def resolve_cfg(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
 
 def _require_torch():
     try:
-        import torch  # noqa: F401
+        import torch
     except Exception as exc:  # pragma: no cover
         raise ImportError(
             "the 'sasrec' family requires PyTorch; install torch in the job "
@@ -229,7 +230,7 @@ class SASRecModel:
         return path
 
     @classmethod
-    def load(cls, path: str) -> "SASRecModel":
+    def load(cls, path: str) -> SASRecModel:
         torch = _require_torch()
         from amt.jobs.data.features import ItemIndex
 

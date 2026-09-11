@@ -134,7 +134,8 @@ class ReadOnlySQL:
         rows = self.query(f"SELECT {exprs} FROM {t}")
         if not rows:
             return {}
-        return {k: float(v) if v is not None else 0.0 for k, v in rows[0].items()}
+        row = rows[0]
+        return {c: float(row[c]) if row.get(c) is not None else 0.0 for c in cols if c in row}
 
     def sample(self, table: str, n: int = 10) -> list[dict[str, Any]]:
         n = max(1, min(int(n), self.row_limit))

@@ -14,21 +14,22 @@ import importlib
 import json
 import os
 import tempfile
-from typing import Any, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 __all__ = [
     "FAMILIES",
     "PYFUNC_INPUT_COLUMNS",
-    "UnknownFamily",
-    "get_module",
-    "get_builder",
-    "fit_model",
-    "save_model",
-    "load_model",
     "RecommenderPyfunc",
+    "UnknownFamily",
+    "fit_model",
+    "get_builder",
+    "get_module",
+    "load_model",
     "log_pyfunc_model",
-    "recommend_with_pyfunc",
     "pyfunc_signature",
+    "recommend_with_pyfunc",
+    "save_model",
 ]
 
 FAMILIES: dict[str, str] = {
@@ -134,7 +135,7 @@ class RecommenderPyfunc(_PythonModel):  # type: ignore[valid-type,misc]
             raise RuntimeError("pyfunc context not loaded")
         return self._model
 
-    def predict(self, context, model_input, params=None):  # noqa: D102
+    def predict(self, context, model_input, params=None):
         from amt.jobs.data.features import as_item_list
 
         if self._model is None and context is not None:

@@ -25,7 +25,8 @@ import os
 import tempfile
 import time
 import uuid
-from typing import Any, Literal, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal
 
 from amt.databricks import jobs as jobs_mod
 from amt.databricks import wheel as wheel_mod

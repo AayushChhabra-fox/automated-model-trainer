@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -29,7 +29,7 @@ class AgentError(RuntimeError):
     """Raised when an agent cannot produce a valid structured result."""
 
 
-@lru_cache(maxsize=None)
+@cache
 def load_prompt(name: str) -> str:
     """Load ``prompts/<name>.md``."""
     path = PROMPT_DIR / f"{name}.md"

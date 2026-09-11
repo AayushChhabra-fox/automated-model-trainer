@@ -19,7 +19,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["DEFAULTS", "generate", "write_local", "write_uc", "seed"]
+__all__ = ["DEFAULTS", "generate", "seed", "write_local", "write_uc"]
 
 DEFAULTS: dict[str, Any] = {
     "n_users": 2000,
@@ -131,7 +131,7 @@ def seed(
     return {
         "backend": backend,
         "location": location,
-        "rows": int(len(frame)),
+        "rows": len(frame),
         "n_users": int(frame["user_id"].nunique()),
         "n_items": int(frame["item_id"].nunique()),
     }

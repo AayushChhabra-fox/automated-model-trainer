@@ -13,6 +13,7 @@ import pytest
 from amt.jobs.data import features
 from amt.jobs.models import popularity, registry
 
+
 def _torch():
     """Skip the SASRec cases when torch is not installed (CPU torch is enough)."""
     return pytest.importorskip("torch")

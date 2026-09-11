@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -77,7 +78,7 @@ class PopularityModel:
         return path
 
     @classmethod
-    def load(cls, path: str) -> "PopularityModel":
+    def load(cls, path: str) -> PopularityModel:
         with open(os.path.join(path, "state.json"), encoding="utf-8") as fh:
             state = json.load(fh)
         cfg: dict[str, Any] = {}

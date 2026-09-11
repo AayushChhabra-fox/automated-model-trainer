@@ -18,19 +18,20 @@ local dry-runs); it honours exactly the same guard and row-count checks.
 from __future__ import annotations
 
 import os
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 __all__ = [
     "CANONICAL_SPLITS",
     "LOCAL_FORMATS",
     "SplitAccessViolation",
     "SplitContractMismatch",
+    "SplitGuard",
     "normalize_split_name",
     "parse_allowed_splits",
-    "split_ref",
     "read_local_table",
+    "split_ref",
     "write_local_table",
-    "SplitGuard",
 ]
 
 # Preference order for the no-Spark fallback.  Parquet first (what UC holds),
@@ -209,11 +210,11 @@ class SplitGuard:
                     f"split {name!r} has no table in the contract"
                 )
             if version is None:
-                query = f"SELECT * FROM {table}"  # noqa: S608 - contract-controlled
+                query = f"SELECT * FROM {table}"
             else:
                 query = (
                     f"SELECT * FROM {table} VERSION AS OF {int(version)}"
-                )  # noqa: S608
+                )
             df = spark.sql(query)
             actual = df.count()
         else:

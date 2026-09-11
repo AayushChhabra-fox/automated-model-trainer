@@ -19,7 +19,7 @@ the input order.
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 
@@ -28,16 +28,16 @@ HARNESS_VERSION = "1.0.0"
 DEFAULT_KS: tuple[int, ...] = (5, 10, 20)
 
 __all__ = [
-    "HARNESS_VERSION",
     "DEFAULT_KS",
-    "recall_at_k",
-    "ndcg_at_k",
-    "hitrate_at_k",
-    "mrr",
-    "item_coverage",
-    "per_user_metrics",
+    "HARNESS_VERSION",
     "evaluate",
+    "hitrate_at_k",
+    "item_coverage",
     "metric_names",
+    "mrr",
+    "ndcg_at_k",
+    "per_user_metrics",
+    "recall_at_k",
 ]
 
 

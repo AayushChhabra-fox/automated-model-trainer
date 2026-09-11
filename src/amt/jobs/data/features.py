@@ -9,21 +9,22 @@ runs identically on a Databricks driver and in unit tests.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 import numpy as np
 
 __all__ = [
+    "EvalFrame",
     "ItemIndex",
+    "as_item_list",
+    "build_eval_frame",
     "build_item_index",
     "build_sequences",
-    "as_item_list",
     "encode",
-    "pad_left",
-    "EvalFrame",
-    "build_eval_frame",
     "history_stats",
+    "pad_left",
 ]
 
 PAD_ID = 0  # reserved; encoded item ids start at 1
@@ -61,11 +62,11 @@ class ItemIndex:
         return {"items": list(self.items)}
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ItemIndex":
+    def from_dict(cls, payload: dict[str, Any]) -> ItemIndex:
         return cls.from_items(payload.get("items", []))
 
     @classmethod
-    def from_items(cls, items: Iterable[Any]) -> "ItemIndex":
+    def from_items(cls, items: Iterable[Any]) -> ItemIndex:
         ordered = list(items)
         return cls(
             items=ordered,

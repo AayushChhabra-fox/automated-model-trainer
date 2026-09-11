@@ -8,16 +8,16 @@ reports.
 
 from __future__ import annotations
 
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 
 __all__ = [
     "DEFAULT_BOOTSTRAP_SEED",
     "DEFAULT_N_BOOTSTRAP",
-    "per_user_deltas",
     "paired_bootstrap",
     "paired_comparison",
+    "per_user_deltas",
 ]
 
 DEFAULT_BOOTSTRAP_SEED = 20240917

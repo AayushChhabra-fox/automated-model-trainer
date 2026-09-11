@@ -13,7 +13,8 @@ from __future__ import annotations
 import os
 import tempfile
 import time
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from amt.jobs.data.features import build_eval_frame, build_item_index
 from amt.jobs.data.loaders import SplitGuard
@@ -26,8 +27,8 @@ __all__ = [
     "ContractMismatch",
     "assert_contract",
     "contract_eval_settings",
-    "train_and_evaluate",
     "run",
+    "train_and_evaluate",
 ]
 
 TRAIN_SPLITS = ("train", "validation")

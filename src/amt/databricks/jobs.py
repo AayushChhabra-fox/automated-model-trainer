@@ -11,20 +11,21 @@ this module without ``databricks-sdk`` installed.
 from __future__ import annotations
 
 import time
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 __all__ = [
-    "TERMINAL_LIFECYCLE_STATES",
     "SUCCESS_RESULT_STATES",
+    "TERMINAL_LIFECYCLE_STATES",
     "JobRunError",
     "build_task",
-    "submit_run",
     "get_run",
-    "run_state",
-    "is_terminal",
-    "wait_for_terminal",
-    "run_page_url",
     "get_run_output",
+    "is_terminal",
+    "run_page_url",
+    "run_state",
+    "submit_run",
+    "wait_for_terminal",
 ]
 
 TERMINAL_LIFECYCLE_STATES = {"TERMINATED", "SKIPPED", "INTERNAL_ERROR"}

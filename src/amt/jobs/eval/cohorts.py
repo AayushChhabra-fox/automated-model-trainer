@@ -7,7 +7,7 @@ identical for every model in a campaign, which is why the buckets live here
 
 from __future__ import annotations
 
-from typing import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -15,11 +15,11 @@ __all__ = [
     "COHORT_DIMENSIONS",
     "DEFAULT_HISTORY_BUCKETS",
     "DEFAULT_RECENCY_BUCKETS",
+    "aggregate_by_cohort",
+    "assign_cohorts",
+    "cohort_metrics",
     "history_length_cohort",
     "recency_cohort",
-    "assign_cohorts",
-    "aggregate_by_cohort",
-    "cohort_metrics",
 ]
 
 # (upper_bound_exclusive, label) -- the final entry is the open-ended bucket.

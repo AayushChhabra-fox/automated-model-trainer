@@ -1,0 +1,293 @@
+<title>AMT Campaign Map</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#F2F4F6; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5563; --ink-3:#7A8595;
+  --rule:#D5DAE1; --human:#C77D1A; --human-bg:#FBF1E1;
+  --dbx:#2F5D7C; --dbx-bg:#E6EEF4;
+  --train:#4C6A8A; --val:#1F8A7A; --qa:#A83A3A; --qa-bg:#F6E7E7;
+  --agent-bg:#FFFFFF;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#141A21; --paper:#1C242D; --ink:#E7ECF1; --ink-2:#B4BEC9; --ink-3:#7F8B98;
+    --rule:#334050; --human:#E5A24A; --human-bg:#3A2C15;
+    --dbx:#7FB2D6; --dbx-bg:#1F3140;
+    --train:#8FAECB; --val:#4DBFAE; --qa:#E07A7A; --qa-bg:#3B2222;
+    --agent-bg:#1C242D;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#141A21; --paper:#1C242D; --ink:#E7ECF1; --ink-2:#B4BEC9; --ink-3:#7F8B98;
+  --rule:#334050; --human:#E5A24A; --human-bg:#3A2C15;
+  --dbx:#7FB2D6; --dbx-bg:#1F3140;
+  --train:#8FAECB; --val:#4DBFAE; --qa:#E07A7A; --qa-bg:#3B2222;
+  --agent-bg:#1C242D;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:15px;line-height:1.5;margin:0}
+.page{max-width:1040px;margin:0 auto;padding:40px 24px 64px}
+h1,h2,h3{font-family:"IBM Plex Serif",Georgia,serif;text-wrap:balance;margin:0}
+h1{font-size:34px;font-weight:600;line-height:1.15}
+h2{font-size:22px;font-weight:600;margin-top:48px;margin-bottom:8px}
+h3{font-size:16px;font-weight:600}
+p{max-width:66ch;margin:0}
+.lede{color:var(--ink-2);font-size:17px;margin-top:10px;max-width:70ch}
+.eyebrow{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.92em}
+figure{margin:20px 0 0;background:var(--paper);border:1px solid var(--rule);border-radius:6px;padding:20px;overflow-x:auto}
+figcaption{color:var(--ink-2);font-size:13.5px;margin-top:10px;max-width:80ch}
+svg{max-width:100%;height:auto;display:block;color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif}
+svg text{font-size:12.5px;fill:currentColor}
+svg .lane{font-family:"IBM Plex Serif",Georgia,serif;font-size:14px;font-weight:600}
+svg .sub{font-size:11px;fill:var(--ink-3)}
+svg .mono{font-family:"IBM Plex Mono",monospace;font-size:11.5px}
+svg .box{fill:var(--agent-bg);stroke:currentColor;stroke-width:1.2}
+svg .hc{fill:var(--human-bg);stroke:var(--human);stroke-width:1.6}
+svg .hc-t{fill:var(--human);font-weight:600}
+svg .dbx{fill:var(--dbx-bg);stroke:var(--dbx);stroke-width:1.2}
+svg .dbx-t{fill:var(--dbx)}
+svg .qa{fill:var(--qa-bg);stroke:var(--qa);stroke-width:1.4}
+svg .qa-t{fill:var(--qa)}
+svg .edge{stroke:currentColor;stroke-width:1.2;fill:none}
+svg .edge-h{stroke:var(--human);stroke-width:1.3;fill:none}
+svg .edge-d{stroke:var(--dbx);stroke-width:1.2;fill:none}
+svg .edge-q{stroke:var(--qa);stroke-width:1.3;fill:none}
+svg .loop{stroke-dasharray:4 3}
+svg .lane-rule{stroke:var(--rule);stroke-width:1;stroke-dasharray:2 4}
+svg .lbl{font-size:11px;fill:var(--ink-2)}
+.grid{display:grid;gap:14px;margin-top:16px}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:760px){.g3,.g4{grid-template-columns:1fr}}
+.tile{background:var(--paper);border:1px solid var(--rule);border-radius:6px;padding:16px 18px}
+.tile p{font-size:14px;color:var(--ink-2);margin-top:6px}
+.tile .eyebrow{display:block;margin-bottom:4px}
+.verdict{border-top:3px solid var(--rule)}
+.verdict.pass{border-top-color:var(--val)}
+.verdict.fail{border-top-color:var(--human)}
+.verdict.spec{border-top-color:var(--qa)}
+.verdict.inv{border-top-color:var(--ink-3)}
+.tablewrap{overflow-x:auto;margin-top:16px}
+table{border-collapse:collapse;width:100%;background:var(--paper);border:1px solid var(--rule);font-size:14px;min-width:640px}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--rule);vertical-align:top}
+th{font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+tr:last-child td{border-bottom:none}
+td.c{text-align:center;font-family:"IBM Plex Mono",monospace;font-size:13px}
+.yes{color:var(--val);font-weight:600}.no{color:var(--qa);font-weight:600}.sub-yes{color:var(--ink-3)}
+.split{display:inline-block;padding:1px 8px;border-radius:3px;font-family:"IBM Plex Mono",monospace;font-size:12px;color:#fff;text-transform:none;letter-spacing:0}
+.s-train{background:var(--train)}.s-val{background:var(--val)}.s-qa{background:var(--qa)}
+ol.rules{margin:14px 0 0;padding-left:22px;max-width:74ch;color:var(--ink-2);font-size:14.5px}
+ol.rules li{margin-bottom:6px}
+ol.rules b{color:var(--ink);font-weight:600}
+.legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;font-size:13px;color:var(--ink-2)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:14px;height:14px;border-radius:3px;border:1.5px solid;display:inline-block}
+</style>
+
+<div class="page">
+  <span class="eyebrow">Automated Model Trainer · campaign anatomy</span>
+  <h1>One hypothesis, one frozen champion, one honest answer</h1>
+  <p class="lede">A campaign moves across three lanes: the human who owns the decision, the agents running in the local CLI, and Databricks doing every unit of compute. Four checkpoints belong to the human; everything between the third and fourth runs on its own inside the agreed budget.</p>
+
+  <div class="legend">
+    <span><i class="sw" style="background:var(--human-bg);border-color:var(--human)"></i>Human checkpoint</span>
+    <span><i class="sw" style="background:var(--agent-bg);border-color:var(--ink)"></i>Agent step (local CLI)</span>
+    <span><i class="sw" style="background:var(--dbx-bg);border-color:var(--dbx)"></i>Databricks job → MLflow</span>
+    <span><i class="sw" style="background:var(--qa-bg);border-color:var(--qa)"></i>QA holdout — sealed until freeze</span>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 980 1190" role="img" aria-label="Swimlane diagram of an AMT campaign across Human, Agents, and Databricks lanes, from product problem through ProblemSpec and EvaluationContract approvals, the trainer loop on train and validation splits, champion freeze, QA phases 0 and 1 on the sealed QA split, to the scientific conclusion and promotion decision.">
+      <defs>
+        <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--human)"/></marker>
+        <marker id="ad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--dbx)"/></marker>
+        <marker id="aq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--qa)"/></marker>
+      </defs>
+
+      <text class="lane" x="115" y="28" text-anchor="middle">Human</text>
+      <text class="sub" x="115" y="44" text-anchor="middle">owns the decision</text>
+      <text class="lane" x="440" y="28" text-anchor="middle">Agents · local CLI</text>
+      <text class="sub" x="440" y="44" text-anchor="middle">LangGraph, checkpointed in SQLite</text>
+      <text class="lane" x="810" y="28" text-anchor="middle">Databricks</text>
+      <text class="sub" x="810" y="44" text-anchor="middle">jobs run as the service principal</text>
+      <line class="lane-rule" x1="230" y1="56" x2="230" y2="1180"/>
+      <line class="lane-rule" x1="650" y1="56" x2="650" y2="1180"/>
+
+      <!-- Row 1 -->
+      <rect class="hc" x="20" y="72" width="190" height="52" rx="4"/>
+      <text class="hc-t" x="115" y="94" text-anchor="middle">HC1 · Product problem</text>
+      <text class="sub" x="115" y="112" text-anchor="middle">natural language</text>
+      <path class="edge-h" d="M210 98 H285" marker-end="url(#ah)"/>
+      <rect class="box" x="290" y="72" width="300" height="52" rx="4"/>
+      <text x="440" y="94" text-anchor="middle" font-weight="600">Problem Specification Agent</text>
+      <text class="sub" x="440" y="112" text-anchor="middle">inspects data before writing the ML problem</text>
+      <path class="edge-d" d="M590 88 H700" marker-end="url(#ad)"/>
+      <path class="edge-d" d="M700 108 H590" marker-end="url(#ad)"/>
+      <text class="lbl" x="645" y="82" text-anchor="middle">read-only SQL</text>
+      <text class="lbl" x="645" y="126" text-anchor="middle">schema · volume · labels · leakage</text>
+      <rect class="dbx" x="705" y="72" width="210" height="52" rx="4"/>
+      <text class="dbx-t" x="810" y="94" text-anchor="middle" font-weight="600">Unity Catalog tables</text>
+      <text class="sub" x="810" y="112" text-anchor="middle">SQL warehouse, SELECT only</text>
+
+      <!-- Row 2 -->
+      <path class="edge" d="M440 124 V158" marker-end="url(#a)"/>
+      <rect class="box" x="335" y="162" width="210" height="40" rx="4"/>
+      <text class="mono" x="440" y="187" text-anchor="middle">ProblemSpec</text>
+      <path class="edge-h" d="M335 182 H215" marker-end="url(#ah)"/>
+      <rect class="hc" x="20" y="156" width="190" height="52" rx="4"/>
+      <text class="hc-t" x="115" y="178" text-anchor="middle">HC2 · Approve spec</text>
+      <text class="sub" x="115" y="196" text-anchor="middle">amt approve · amt reject -m</text>
+      <path class="edge-h loop" d="M60 156 V140 H300 V128" marker-end="url(#ah)"/>
+      <text class="lbl" x="170" y="136" text-anchor="middle">reject → feedback → redraft</text>
+
+      <!-- Row 3 -->
+      <path class="edge" d="M440 202 V236" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="240" width="300" height="52" rx="4"/>
+      <text x="440" y="262" text-anchor="middle" font-weight="600">Evaluation Contract</text>
+      <text class="sub" x="440" y="280" text-anchor="middle">splits · population · labels · metrics · harness v1.0.0</text>
+      <path class="edge-d" d="M590 266 H700" marker-end="url(#ad)"/>
+      <text class="lbl" x="645" y="258" text-anchor="middle">materialize</text>
+      <rect class="dbx" x="705" y="240" width="210" height="52" rx="4"/>
+      <text class="dbx-t" x="810" y="262" text-anchor="middle" font-weight="600">Frozen Delta splits</text>
+      <text class="sub" x="810" y="280" text-anchor="middle">train · validation · qa @ version</text>
+
+      <!-- Row 4 -->
+      <path class="edge" d="M440 292 V326" marker-end="url(#a)"/>
+      <rect class="box" x="335" y="330" width="210" height="40" rx="4"/>
+      <text class="mono" x="440" y="355" text-anchor="middle">contract_hash</text>
+      <path class="edge-h" d="M335 350 H215" marker-end="url(#ah)"/>
+      <rect class="hc" x="20" y="324" width="190" height="52" rx="4"/>
+      <text class="hc-t" x="115" y="346" text-anchor="middle">HC3 · Approve contract</text>
+      <text class="sub" x="115" y="364" text-anchor="middle">ground truth frozen for the campaign</text>
+      <path class="edge-h loop" d="M60 324 V308 H300 V296" marker-end="url(#ah)"/>
+
+      <!-- autonomous band -->
+      <rect x="240" y="392" width="730" height="726" rx="6" fill="none" stroke="var(--rule)" stroke-width="1"/>
+      <text class="sub" x="255" y="410">AUTONOMOUS · within iteration and compute budget · every step asserts contract_hash</text>
+
+      <!-- Row 5 -->
+      <path class="edge" d="M440 370 V424" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="428" width="300" height="40" rx="4"/>
+      <text x="440" y="453" text-anchor="middle">Run baseline on validation</text>
+      <path class="edge-d" d="M590 448 H700" marker-end="url(#ad)"/>
+      <rect class="dbx" x="705" y="428" width="210" height="40" rx="4"/>
+      <text class="dbx-t" x="810" y="453" text-anchor="middle">popularity baseline → MLflow</text>
+
+      <!-- Row 6 -->
+      <path class="edge" d="M440 468 V502" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="506" width="300" height="52" rx="4"/>
+      <text x="440" y="528" text-anchor="middle" font-weight="600">Experiment Planner</text>
+      <text class="sub" x="440" y="546" text-anchor="middle">falsifiable Hypothesis → ExperimentPlan (bounds, budget)</text>
+
+      <!-- Row 7 -->
+      <path class="edge" d="M440 558 V592" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="596" width="300" height="64" rx="4"/>
+      <text x="440" y="618" text-anchor="middle" font-weight="600">Trainer Agent</text>
+      <text class="sub" x="440" y="634" text-anchor="middle">Observation → Interpretation → Change → Expected effect</text>
+      <text class="mono" x="440" y="650" text-anchor="middle">ExperimentConfig</text>
+      <path class="edge-d" d="M590 616 H700" marker-end="url(#ad)"/>
+      <text class="lbl" x="645" y="608" text-anchor="middle">submit wheel job</text>
+      <path class="edge-d" d="M700 644 H590" marker-end="url(#ad)"/>
+      <text class="mono lbl" x="645" y="662" text-anchor="middle">TrainingRunResult</text>
+      <rect class="dbx" x="705" y="596" width="210" height="64" rx="4"/>
+      <text class="dbx-t" x="810" y="618" text-anchor="middle" font-weight="600">Training job</text>
+      <text class="sub" x="810" y="634" text-anchor="middle">SplitGuard: train + validation only</text>
+      <text class="sub" x="810" y="650" text-anchor="middle">params · metrics · model → MLflow</text>
+      <path class="edge loop" d="M290 640 H262 V606 H285" marker-end="url(#a)"/>
+      <text class="lbl" x="258" y="678" text-anchor="start">iterate until: success · plateau · budget · falsified</text>
+
+      <!-- Row 8 -->
+      <path class="edge" d="M440 660 V694" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="698" width="300" height="52" rx="4"/>
+      <text x="440" y="720" text-anchor="middle" font-weight="600">Hypothesis Champion</text>
+      <text class="sub" x="440" y="738" text-anchor="middle">one config per hypothesis, guardrails over raw metric</text>
+      <path class="edge loop" d="M590 724 H620 V532 H595" marker-end="url(#a)"/>
+      <text class="lbl" x="632" y="628" text-anchor="middle" transform="rotate(90 632 628)">next hypothesis</text>
+
+      <path class="edge" d="M440 750 V784" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="788" width="300" height="52" rx="4" stroke-width="2"/>
+      <text x="440" y="810" text-anchor="middle" font-weight="600">Champion Freeze</text>
+      <text class="mono sub" x="440" y="828" text-anchor="middle">FrozenChampion · immutable · exactly one</text>
+
+      <!-- Row 9 -->
+      <path class="edge-q" d="M440 840 V874" marker-end="url(#aq)"/>
+      <rect class="qa" x="290" y="878" width="300" height="52" rx="4"/>
+      <text class="qa-t" x="440" y="900" text-anchor="middle" font-weight="600">QA Phase 0 · Integrity</text>
+      <text class="sub" x="440" y="918" text-anchor="middle">artifact loads, schema, reproduces logged validation</text>
+      <path class="edge-q" d="M590 904 H700" marker-end="url(#aq)"/>
+      <rect class="dbx" x="705" y="878" width="210" height="52" rx="4"/>
+      <text class="dbx-t" x="810" y="900" text-anchor="middle">Integrity job</text>
+      <text class="sub" x="810" y="918" text-anchor="middle">validation subset only · pyfunc load</text>
+      <path class="edge-q loop" d="M290 916 H262 V890 H285" marker-end="url(#aq)"/>
+      <text class="lbl" x="258" y="948" text-anchor="start">INVALID_EXPERIMENT → fix plumbing, never the model · ≤3 tries</text>
+
+      <!-- Row 10 -->
+      <path class="edge-q" d="M440 930 V964" marker-end="url(#aq)"/>
+      <rect class="qa" x="290" y="968" width="300" height="52" rx="4"/>
+      <text class="qa-t" x="440" y="990" text-anchor="middle" font-weight="600">QA Phase 1 · Holdout</text>
+      <text class="sub" x="440" y="1008" text-anchor="middle">candidate vs baseline, paired per-user deltas + bootstrap CI</text>
+      <path class="edge-q" d="M590 994 H700" marker-end="url(#aq)"/>
+      <rect class="qa" x="705" y="968" width="210" height="52" rx="4"/>
+      <text class="qa-t" x="810" y="990" text-anchor="middle" font-weight="600">Holdout job</text>
+      <text class="sub" x="810" y="1008" text-anchor="middle">SplitGuard: qa only · first and only read</text>
+
+      <!-- Row 11 -->
+      <path class="edge" d="M440 1020 V1054" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="1058" width="300" height="52" rx="4"/>
+      <text x="440" y="1080" text-anchor="middle" font-weight="600">Scientific Conclusion</text>
+      <text class="sub" x="440" y="1098" text-anchor="middle">PASS · FAIL_HYPOTHESIS · SPEC_REVIEW — a negative result counts</text>
+      <path class="edge-d" d="M590 1084 H700" marker-end="url(#ad)"/>
+      <rect class="dbx" x="705" y="1058" width="210" height="52" rx="4"/>
+      <text class="dbx-t" x="810" y="1080" text-anchor="middle">Final MLflow run</text>
+      <text class="sub" x="810" y="1098" text-anchor="middle">model · QA metrics · lineage · report</text>
+      <path class="edge-h" d="M290 1084 H215" marker-end="url(#ah)"/>
+      <rect class="hc" x="20" y="1058" width="190" height="52" rx="4"/>
+      <text class="hc-t" x="115" y="1080" text-anchor="middle">HC4 · Promotion decision</text>
+      <text class="sub" x="115" y="1098" text-anchor="middle">A/B · shadow · reject · revise contract</text>
+      <path class="edge-h loop" d="M115 1110 V1140 H12 V180 H16" marker-end="url(#ah)"/>
+      <text class="lbl" x="130" y="1160" text-anchor="middle">SPEC_REVIEW returns to HC2/HC3 — never silently continues</text>
+    </svg>
+    <figcaption>Every arrow that crosses into Databricks is a job submitted as the service principal; every arrow into the Human lane is a checkpoint where the CLI pauses and waits. The QA split (red) is read exactly once, by the holdout job, after the champion is frozen.</figcaption>
+  </figure>
+
+  <h2>Who may read which split</h2>
+  <p style="color:var(--ink-2)">Enforced by <code>SplitGuard</code> inside the job, not by prompt. Train jobs receive an allow-list that physically excludes <code>qa</code>.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Job role</th><th style="text-align:center"><span class="split s-train">train</span></th><th style="text-align:center"><span class="split s-val">validation</span></th><th style="text-align:center"><span class="split s-qa">qa</span></th><th>Used for</th></tr></thead>
+    <tbody>
+      <tr><td>baseline</td><td class="c yes">read</td><td class="c yes">read</td><td class="c no">—</td><td>Reference point on the same ground truth</td></tr>
+      <tr><td>train (Trainer loop)</td><td class="c yes">fit</td><td class="c yes">select, early-stop</td><td class="c no">—</td><td>Architecture, features, hyperparameters, champion choice</td></tr>
+      <tr><td>qa_phase0</td><td class="c no">—</td><td class="c sub-yes">approved subset</td><td class="c no">—</td><td>Does the artifact reproduce its own logged behavior?</td></tr>
+      <tr><td>qa_phase1</td><td class="c no">—</td><td class="c no">—</td><td class="c yes">read once</td><td>Does the frozen champion generalize? Evidence, not a tuning signal</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>What QA can say</h2>
+  <div class="grid g4">
+    <div class="tile verdict inv"><span class="eyebrow">Phase 0 only</span><h3 class="mono">INVALID_EXPERIMENT</h3><p>The artifact or evaluation path is broken. Fix the defect and rerun Phase 0 — architecture, features, hyperparameters and model choice stay untouched.</p></div>
+    <div class="tile verdict pass"><span class="eyebrow">Phase 1</span><h3 class="mono">PASS</h3><p>Meets the acceptance criteria set before QA ran. Register as candidate; proceed to online A/B or shadow evaluation.</p></div>
+    <div class="tile verdict fail"><span class="eyebrow">Phase 1</span><h3 class="mono">FAIL_HYPOTHESIS</h3><p>Won on validation, did not generalize. Recorded as a finding. The same model's search is not reopened with QA feedback.</p></div>
+    <div class="tile verdict spec"><span class="eyebrow">Phase 1</span><h3 class="mono">SPEC_REVIEW</h3><p>Evidence that labels, population, candidates or metrics are wrong. Back to the human before anything in the spec or contract changes.</p></div>
+  </div>
+
+  <h2>Where things live</h2>
+  <div class="grid g3">
+    <div class="tile"><span class="eyebrow">MLflow</span><h3>Everything about a run</h3><p>Params, per-epoch curves, validation and QA metrics, model artifacts, <code>result.json</code>, the final report. Tagged with campaign, hypothesis, <code>contract_hash</code>, harness version, code version.</p></div>
+    <div class="tile"><span class="eyebrow">Delta tables</span><h3>Only the ground truth</h3><p>Materialized <code>split_train</code>, <code>split_validation</code>, <code>split_qa</code>, pinned by Delta version and a membership hash. Source tables are read, never copied per experiment.</p></div>
+    <div class="tile"><span class="eyebrow">Orchestrator state</span><h3>Just enough to resume</h3><p>Stage, approvals, current hypothesis, budget, run IDs, frozen champion reference. A SQLite checkpoint per campaign; <code>amt resume</code> picks up mid-loop.</p></div>
+  </div>
+
+  <h2>Rules enforced in code, not prose</h2>
+  <ol class="rules">
+    <li><b>One contract per campaign.</b> <code>contract_hash</code> is stamped at HC3; every node and every job asserts it before doing work.</li>
+    <li><b>Splits are immutable.</b> Jobs read <code>VERSION AS OF</code> and verify row counts against the contract.</li>
+    <li><b>Train jobs cannot see QA.</b> <code>SplitGuard</code> raises on any read outside the role's allow-list.</li>
+    <li><b>QA needs a freeze.</b> Routing refuses Phase 0 unless exactly one <code>FrozenChampion</code> exists; the Trainer cannot re-enter after freeze.</li>
+    <li><b>Same math for everyone.</b> A single versioned evaluation harness scores baseline, candidates and QA; QA loads the model through MLflow pyfunc, not the trainer's in-memory object.</li>
+    <li><b>Bounded loops.</b> The trainer stops at <code>max_iterations</code> or compute budget regardless of what the agent proposes; Phase 0 retries are capped at three.</li>
+  </ol>
+</div>
