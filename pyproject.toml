@@ -1,0 +1,65 @@
+[project]
+name = "amt"
+version = "0.1.0"
+description = "Automated Model Trainer & QA Agent — autonomous ML experimentation on Databricks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    "langgraph>=0.2.40",
+    "langgraph-checkpoint-sqlite>=2.0.0",
+    "langchain-anthropic>=0.2.0",
+    "langchain-core>=0.3.0",
+    "databricks-sdk>=0.30.0",
+    "mlflow>=2.15",
+    "typer>=0.12",
+    "rich>=13.7",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+jobs = [
+    "torch>=2.2",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
+]
+
+[project.scripts]
+amt = "amt.cli:app"
+amt-job = "amt.jobs.entry:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/amt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+ignore = ["B008", "RUF012", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+
+[tool.ruff.format]
+quote-style = "double"
