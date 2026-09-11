@@ -1,0 +1,442 @@
+"""Independent QA job (SPEC stages 9/10).
+
+Two strictly ordered phases:
+
+**Phase 0 -- integrity & reproducibility.** Loads the frozen champion the
+way a serving system would (MLflow pyfunc, not the trainer's in-memory
+object), checks the artifact, the schema, the contract stamp and the harness
+version, and re-scores an approved *subset* of validation to confirm the
+artifact reproduces its logged behaviour.  This is the only phase that may
+return ``INVALID_EXPERIMENT``.
+
+**Phase 1 -- holdout evaluation.** The only place in the system that reads
+the QA split, and it must be granted *exactly* ``qa``.  Evaluates the frozen
+candidate and the baseline on the identical QA population, produces paired
+per-user deltas with bootstrap CIs, cohort breakdowns and operational
+metrics.
+
+Nothing in this module fits, refits or mutates the candidate; it has no
+optimiser, no config search and no write path back into training.  A poor QA
+result is evidence, not a signal (SPEC "QA Independence").
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from typing import Any, Mapping, Sequence
+
+from amt.jobs.data.features import build_eval_frame
+from amt.jobs.data.loaders import SplitGuard
+from amt.jobs.eval import cohorts as cohort_mod
+from amt.jobs.eval.harness import HARNESS_VERSION, evaluate
+from amt.jobs.eval.paired import paired_comparison
+from amt.jobs.models.registry import recommend_with_pyfunc
+from amt.jobs.train import REPRO_PREFIX, assert_contract, contract_eval_settings
+
+__all__ = [
+    "PHASE0_SPLITS",
+    "PHASE1_SPLITS",
+    "Check",
+    "phase0",
+    "phase1",
+    "run_phase0",
+    "run_phase1",
+]
+
+PHASE0_SPLITS = ("validation",)
+PHASE1_SPLITS = ("qa",)
+
+
+def Check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:  # noqa: N802
+    """One phase-0 integrity check result."""
+    return {"name": name, "passed": bool(passed), "detail": str(detail)}
+
+
+def _load_pyfunc(model_uri: str):
+    import mlflow.pyfunc
+
+    return mlflow.pyfunc.load_model(model_uri)
+
+
+def _slice(frame, n: int):
+    from amt.jobs.data.features import EvalFrame
+
+    return EvalFrame(
+        user_ids=frame.user_ids[:n],
+        histories=frame.histories[:n],
+        truths=frame.truths[:n],
+        days_since_last=(
+            frame.days_since_last[:n] if frame.days_since_last is not None else None
+        ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Phase 0
+# --------------------------------------------------------------------------
+
+
+def phase0(
+    contract: Mapping[str, Any],
+    frozen: Mapping[str, Any],
+    allowed_splits: str | Sequence[str],
+    spark: Any | None = None,
+    local_dir: str | None = None,
+    loader: Any = None,
+) -> dict[str, Any]:
+    """Integrity and reproducibility of the frozen champion."""
+    from amt.jobs.entry import to_pandas
+
+    checks: list[dict[str, Any]] = []
+    reproduction_deltas: dict[str, float] = {}
+    settings = contract_eval_settings(contract)
+    ks, tolerance = settings["ks"], settings["tolerance"]
+    k_max = max(ks)
+
+    # -- contract stamps (cheap, and a mismatch invalidates everything else)
+    try:
+        contract_hash = assert_contract(contract, frozen.get("contract_hash"))
+        checks.append(Check("contract_hash_matches", True, contract_hash))
+    except Exception as exc:
+        return _phase0_result(
+            [Check("contract_hash_matches", False, str(exc))], {}, contract, False
+        )
+
+    frozen_harness = frozen.get("harness_version")
+    checks.append(
+        Check(
+            "harness_version_matches",
+            not frozen_harness or str(frozen_harness) == HARNESS_VERSION,
+            f"frozen={frozen_harness!r} wheel={HARNESS_VERSION!r}",
+        )
+    )
+
+    guard = SplitGuard(allowed_splits, contract, local_dir=local_dir)
+    try:
+        # Phase 0 may look at validation (for the reproduction subset) and
+        # nothing else -- certainly not QA.
+        guard.require_subset_of(PHASE0_SPLITS)
+        checks.append(Check("split_scope", True, str(sorted(guard.allowed_splits))))
+    except Exception as exc:
+        checks.append(Check("split_scope", False, str(exc)))
+        return _phase0_result(checks, {}, contract, False)
+
+    # -- artifact loads
+    model_uri = str(frozen.get("model_uri") or "")
+    model = None
+    try:
+        model = (loader or _load_pyfunc)(model_uri)
+        checks.append(Check("artifact_loads", True, model_uri))
+    except Exception as exc:
+        checks.append(Check("artifact_loads", False, f"{model_uri}: {exc}"))
+        return _phase0_result(checks, {}, contract, False)
+
+    # -- signature / schema
+    checks.append(_signature_check(model))
+
+    # -- inference executes on the approved validation subset
+    try:
+        val_df = to_pandas(guard.read("validation", spark))
+        frame = build_eval_frame(val_df)
+        n = int(frozen.get("reproduction_subset_size") or settings["subset_size"])
+        subset = _slice(frame, min(n, len(frame.histories)))
+        ranked = recommend_with_pyfunc(model, subset.histories, k_max)
+        shape_ok = len(ranked) == len(subset.histories)
+        checks.append(
+            Check(
+                "inference_executes",
+                shape_ok,
+                f"{len(ranked)} rows for {len(subset.histories)} users",
+            )
+        )
+        checks.append(
+            Check(
+                "output_ranked_lists",
+                all(isinstance(r, list) for r in ranked),
+                "predict returned ranked lists",
+            )
+        )
+    except Exception as exc:
+        checks.append(Check("inference_executes", False, str(exc)))
+        return _phase0_result(checks, {}, contract, False)
+
+    # -- reproduces the logged validation behaviour within tolerance
+    logged = {
+        key[len(REPRO_PREFIX) :]: value
+        for key, value in (frozen.get("val_metrics") or {}).items()
+        if key.startswith(REPRO_PREFIX)
+    }
+    catalog_size = int(
+        frozen.get("catalog_size")
+        or (frozen.get("val_metrics") or {}).get("catalog_size")
+        or 0
+    )
+    recomputed = evaluate(ranked, subset.truths, ks=ks, catalog_size=catalog_size)
+
+    if not logged:
+        checks.append(
+            Check(
+                "reproduces_logged_validation",
+                False,
+                "training run logged no reproduction subset metrics "
+                f"(expected keys prefixed {REPRO_PREFIX!r})",
+            )
+        )
+        return _phase0_result(checks, {}, contract, False)
+
+    worst = 0.0
+    for metric, expected in logged.items():
+        if metric in ("n_users", "catalog_size", "n_scored"):
+            continue
+        actual = float(recomputed.get(metric, float("nan")))
+        delta = abs(actual - float(expected))
+        reproduction_deltas[metric] = float(actual - float(expected))
+        worst = max(worst, delta)
+    checks.append(
+        Check(
+            "reproduces_logged_validation",
+            worst <= tolerance,
+            f"max |delta| {worst:.6g} vs tolerance {tolerance:.6g}",
+        )
+    )
+
+    passed = all(c["passed"] for c in checks)
+    return _phase0_result(checks, reproduction_deltas, contract, passed)
+
+
+def _signature_check(model) -> dict[str, Any]:
+    try:
+        signature = getattr(getattr(model, "metadata", None), "signature", None)
+    except Exception as exc:  # pragma: no cover
+        return Check("signature_schema", False, str(exc))
+    if signature is None:
+        return Check(
+            "signature_schema", False, "model logged without an input signature"
+        )
+    names = []
+    try:
+        names = [c.name for c in signature.inputs.inputs]
+    except Exception:  # pragma: no cover
+        names = []
+    return Check(
+        "signature_schema",
+        "history" in names,
+        f"input columns {names}",
+    )
+
+
+def _phase0_result(
+    checks: Sequence[Mapping[str, Any]],
+    reproduction_deltas: Mapping[str, float],
+    contract: Mapping[str, Any],
+    passed: bool,
+) -> dict[str, Any]:
+    return {
+        "passed": bool(passed),
+        "checks": [dict(c) for c in checks],
+        "reproduction_deltas": dict(reproduction_deltas),
+        "status": "ok" if passed else "INVALID_EXPERIMENT",
+        "contract_hash": contract.get("contract_hash"),
+        "harness_version": HARNESS_VERSION,
+    }
+
+
+# --------------------------------------------------------------------------
+# Phase 1
+# --------------------------------------------------------------------------
+
+
+def phase1(
+    contract: Mapping[str, Any],
+    frozen: Mapping[str, Any],
+    allowed_splits: str | Sequence[str],
+    baseline_ref: Mapping[str, Any] | None = None,
+    spark: Any | None = None,
+    local_dir: str | None = None,
+    loader: Any = None,
+) -> dict[str, Any]:
+    """Evaluate frozen candidate vs baseline on the untouched QA split."""
+    from amt.jobs.entry import to_pandas
+
+    contract_hash = assert_contract(contract, frozen.get("contract_hash"))
+    settings = contract_eval_settings(contract)
+    ks = settings["ks"]
+    k_max = max(ks)
+
+    guard = SplitGuard(allowed_splits, contract, local_dir=local_dir)
+    # Exactly qa: phase 1 must not be able to re-read train or validation,
+    # which is what would make "re-tune after seeing QA" physically possible.
+    guard.require_exactly(PHASE1_SPLITS)
+
+    qa_df = to_pandas(guard.read("qa", spark))
+    frame = build_eval_frame(qa_df)
+    catalog_size = int(
+        frozen.get("catalog_size")
+        or (frozen.get("val_metrics") or {}).get("catalog_size")
+        or 0
+    )
+
+    load = loader or _load_pyfunc
+    candidate = load(str(frozen.get("model_uri") or ""))
+
+    baseline_ref = dict(baseline_ref or {})
+    baseline_uri = baseline_ref.get("model_uri")
+    if not baseline_uri:
+        raise RuntimeError(
+            "phase 1 needs the baseline's logged model_uri; re-fitting the "
+            "baseline here would require the train split, which this job is "
+            "not granted"
+        )
+    baseline = load(str(baseline_uri))
+
+    cand_ranked = recommend_with_pyfunc(candidate, frame.histories, k_max)
+    base_ranked = recommend_with_pyfunc(baseline, frame.histories, k_max)
+
+    cand = evaluate(
+        cand_ranked, frame.truths, ks=ks, catalog_size=catalog_size,
+        include_per_user=True,
+    )
+    base = evaluate(
+        base_ranked, frame.truths, ks=ks, catalog_size=catalog_size,
+        include_per_user=True,
+    )
+    cand_per_user = cand.pop("per_user")
+    base_per_user = base.pop("per_user")
+
+    paired = paired_comparison(cand_per_user, base_per_user)
+
+    assignments = cohort_mod.assign_cohorts(frame.histories, frame.days_since_last)
+    cohort_candidate = cohort_mod.cohort_metrics(cand_per_user, assignments)
+    cohort_baseline = cohort_mod.cohort_metrics(base_per_user, assignments)
+    cohort_out: dict[str, dict[str, float]] = {}
+    for cohort, block in cohort_candidate.items():
+        merged = {m: float(v) for m, v in block.items()}
+        for metric, value in cohort_baseline.get(cohort, {}).items():
+            merged[f"baseline/{metric}"] = float(value)
+            if metric != "n_users":
+                merged[f"delta/{metric}"] = float(block.get(metric, 0.0)) - float(value)
+        cohort_out[cohort] = merged
+
+    operational = _operational(candidate, frame.histories, k_max, frozen)
+
+    return {
+        "candidate_metrics": {k: float(v) for k, v in cand.items()},
+        "baseline_metrics": {k: float(v) for k, v in base.items()},
+        "paired_deltas": {
+            metric: {k: float(v) for k, v in stats.items()}
+            for metric, stats in paired.items()
+        },
+        "cohort_metrics": cohort_out,
+        "operational": operational,
+        "contract_hash": contract_hash,
+        "harness_version": HARNESS_VERSION,
+        "primary_metric": settings["primary_metric"],
+        "baseline_model_uri": str(baseline_uri),
+        "candidate_model_uri": str(frozen.get("model_uri") or ""),
+        "n_qa_users": int(len(frame.histories)),
+        "splits_read": guard.reads,
+        "status": "success",
+        "error": None,
+    }
+
+
+def _operational(
+    model, histories: Sequence[Sequence[Any]], k: int, frozen: Mapping[str, Any]
+) -> dict[str, float]:
+    """Serving-shaped measurements: single-request latency, size, params."""
+    import numpy as np
+
+    sample = list(histories[:64]) or [[]]
+    timings = []
+    for history in sample:
+        start = time.perf_counter()
+        recommend_with_pyfunc(model, [history], k)
+        timings.append((time.perf_counter() - start) * 1000.0)
+
+    return {
+        "latency_ms_p50": float(np.percentile(np.asarray(timings), 50)),
+        "latency_ms_p95": float(np.percentile(np.asarray(timings), 95)),
+        "model_size_mb": _model_size_mb(model, frozen),
+        "params": _param_count(model),
+    }
+
+
+def _model_size_mb(model, frozen: Mapping[str, Any]) -> float:
+    root = None
+    for attr in ("_model_meta", "metadata"):
+        meta = getattr(model, attr, None)
+        root = getattr(meta, "_model_root", None) or root
+    root = root or getattr(model, "_model_impl", None)
+    path = getattr(root, "_model_root", None) if root is not None else None
+    if not isinstance(path, str):
+        path = str(frozen.get("model_local_path") or "")
+    if not path or not os.path.isdir(path):
+        return 0.0
+    total = 0
+    for dirpath, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:  # pragma: no cover
+                pass
+    return float(total) / (1024.0 * 1024.0)
+
+
+def _param_count(model) -> float:
+    inner = None
+    unwrap = getattr(model, "unwrap_python_model", None)
+    if callable(unwrap):
+        try:
+            inner = getattr(unwrap(), "model", None)
+        except Exception:  # pragma: no cover
+            inner = None
+    if inner is None:
+        # A RecommenderPyfunc used directly (local dry runs, tests).
+        inner = getattr(model, "model", None)
+    if inner is None:
+        return 0.0
+    if hasattr(inner, "n_params"):
+        try:
+            return float(inner.n_params())
+        except Exception:  # pragma: no cover
+            return 0.0
+    return float(getattr(inner, "catalog_size", 0) or 0)
+
+
+# --------------------------------------------------------------------------
+# entry points
+# --------------------------------------------------------------------------
+
+
+def run_phase0(args: Any) -> dict[str, Any]:
+    from amt.jobs.entry import get_spark, load_json_arg
+
+    return phase0(
+        load_json_arg(args.contract_json) or {},
+        load_json_arg(args.frozen_json) or {},
+        args.allowed_splits,
+        spark=get_spark(),
+        local_dir=getattr(args, "local_dir", None),
+    )
+
+
+def run_phase1(args: Any) -> dict[str, Any]:
+    from amt.jobs.entry import get_spark, load_json_arg
+
+    frozen = load_json_arg(args.frozen_json) or {}
+    baseline_ref = frozen.get("baseline") or {}
+    if args.baseline_run_id and not baseline_ref.get("model_uri"):
+        baseline_ref = {
+            **baseline_ref,
+            "run_id": args.baseline_run_id,
+            "model_uri": f"runs:/{args.baseline_run_id}/model",
+        }
+    return phase1(
+        load_json_arg(args.contract_json) or {},
+        frozen,
+        args.allowed_splits,
+        baseline_ref=baseline_ref,
+        spark=get_spark(),
+        local_dir=getattr(args, "local_dir", None),
+    )
