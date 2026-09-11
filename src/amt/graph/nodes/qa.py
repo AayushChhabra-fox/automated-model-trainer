@@ -66,9 +66,16 @@ def make_qa_phase1_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
             raise ContractViolation("QA Phase 1 requires a passing Phase 0.")
         contract = state.get("evaluation_contract")
         frozen = state.get("frozen_champion")
-        result = deps.executor.run_qa_phase1(
-            frozen, state.get("baseline_run_id") or "", contract
-        )
+        baseline_run_id = state.get("baseline_run_id") or ""
+        if not baseline_run_id:
+            # Phase 1 derives `runs:/{id}/model` from this; without it the job
+            # would have to refit the baseline, which needs the train split it
+            # is deliberately not granted.
+            raise ContractViolation(
+                "QA Phase 1 needs the baseline MLflow run id; the baseline was "
+                "never evaluated under this contract."
+            )
+        result = deps.executor.run_qa_phase1(frozen, baseline_run_id, contract)
         if result.contract_hash and result.contract_hash != state.get("contract_hash"):
             raise ContractViolation("QA Phase 1 ran against a different EvaluationContract.")
         return {"stage": Stage.QA_PHASE1.value, "qa_phase1": result}

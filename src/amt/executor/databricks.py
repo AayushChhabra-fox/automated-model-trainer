@@ -112,6 +112,32 @@ class DatabricksExecutor:
             return json.loads(model.model_dump_json())
         return model
 
+    def _frozen_payload(self, frozen: Any) -> dict:
+        """Serialize the FrozenChampion in the shape ``amt.jobs.qa`` reads.
+
+        The schema calls the artifact ``model_artifact_uri`` and its logged
+        validation behaviour ``validation_metrics``; the job side (which must
+        stay importable without ``amt.schemas``) reads ``model_uri`` and
+        ``val_metrics``.  The aliases are added here, at the seam, so neither
+        side has to know about the other's naming.
+        """
+        payload = self._dump(frozen) or {}
+        if not isinstance(payload, dict):
+            return payload
+        payload.setdefault(
+            "model_uri",
+            str(
+                payload.get("model_artifact_uri")
+                or payload.get("checkpoint_uri")
+                or ""
+            ),
+        )
+        val_metrics = dict(payload.get("validation_metrics") or {})
+        payload.setdefault("val_metrics", val_metrics)
+        if "catalog_size" not in payload and "catalog_size" in val_metrics:
+            payload["catalog_size"] = val_metrics["catalog_size"]
+        return payload
+
     def _contract_payload(self, contract: Any) -> dict:
         """Serialize the contract *with* its hash, which jobs assert against."""
         payload = self._dump(contract) or {}
@@ -170,7 +196,7 @@ class DatabricksExecutor:
         if frozen is not None:
             parameters += [
                 "--frozen-json",
-                self._upload_payload(job_run_id, "frozen", self._dump(frozen)),
+                self._upload_payload(job_run_id, "frozen", self._frozen_payload(frozen)),
             ]
         if baseline_run_id:
             parameters += ["--baseline-run-id", str(baseline_run_id)]
@@ -202,6 +228,10 @@ class DatabricksExecutor:
 
         payload = self.fetch_result(job_run_id)
         payload.setdefault("runtime_seconds", time.time() - started)
+        if self.mlflow_experiment_id:
+            payload.setdefault("mlflow_experiment_id", str(self.mlflow_experiment_id))
+        if hypothesis_id:
+            payload.setdefault("hypothesis_id", str(hypothesis_id))
         payload["job_run_id"] = job_run_id
         payload["databricks_run_id"] = run_id
         payload["run_page_url"] = jobs_mod.run_page_url(run)
@@ -225,7 +255,9 @@ class DatabricksExecutor:
             )
         runs = client.search_runs(
             experiment_ids=experiment_ids,
-            filter_string=f"tags.amt.job_run_id = '{job_run_id}'",
+            # The tag key itself contains dots, so it must be quoted or the
+            # MLflow search parser reads ``amt`` as the key and chokes.
+            filter_string=f'tags."amt.job_run_id" = \'{job_run_id}\'',
             max_results=1,
         )
         if not runs:
@@ -268,13 +300,24 @@ class DatabricksExecutor:
         contract: Any,
         split: Literal["validation", "qa"],
     ) -> Any:
-        # The baseline is fitted on train and scored on the requested split.
-        allowed = ("train", "validation") if split == "validation" else ("train", "qa")
+        if split != "validation":
+            from amt.executor.base import ExecutorError
+
+            # A baseline job is `amt.jobs.train` with --role baseline, and that
+            # module refuses anything outside train,validation. QA's baseline
+            # numbers come from phase 1, which loads this run's logged model on
+            # the QA split -- refitting a baseline with `qa` granted would put
+            # the QA population inside a training role.
+            raise ExecutorError(
+                "run_baseline(split='qa') is not supported: QA-split baseline "
+                "metrics are produced by qa_phase1, which loads the baseline "
+                "model logged by the validation baseline run."
+            )
         payload = self._submit(
             "baseline",
             contract=contract,
             config=_baseline_config(spec),
-            allowed_splits=allowed,
+            allowed_splits=ROLE_SPLITS["baseline"],
         )
         return _to_training_run_result(payload, role="baseline")
 
@@ -283,7 +326,11 @@ class DatabricksExecutor:
             "train",
             contract=contract,
             config=config,
-            hypothesis_id=str(getattr(plan, "hypothesis_id", "") or ""),
+            hypothesis_id=str(
+                getattr(plan, "hypothesis_id", "")
+                or getattr(config, "hypothesis_id", "")
+                or ""
+            ),
         )
         return _to_training_run_result(payload, role="train")
 
@@ -321,11 +368,25 @@ def _baseline_run_id(baseline_ref: Any) -> str:
 
 
 def _baseline_config(spec: Any) -> dict:
-    """Config for the baseline run, taken from the ProblemSpec's baseline."""
+    """Config for the baseline run, taken from the ProblemSpec's baseline.
+
+    Shaped as an ``ExperimentConfig`` so the run result round-trips back into
+    the schema: the jobs side reads ``model.family``, the orchestrator side
+    validates the whole dict.
+    """
     baseline = getattr(spec, "baseline", None)
-    family = str(getattr(baseline, "family", "") or "popularity")
-    params = getattr(baseline, "parameters", None) or {}
-    return {"model": {"family": family, **dict(params)}}
+    # BaselineDefinition names the model family in ``kind``.
+    kind = str(getattr(baseline, "kind", "") or "popularity")
+    family = kind if kind in {"popularity", "sasrec"} else "popularity"
+    return {
+        "family": family,
+        "model": {"family": family},
+        "training": {},
+        "loss": {},
+        "features": {},
+        "rationale": str(getattr(baseline, "description", "") or "")
+        or f"Baseline reference: {getattr(baseline, 'name', family)}",
+    }
 
 
 def _keep(model_cls: Any, payload: Mapping[str, Any]) -> dict:
@@ -338,14 +399,21 @@ def _to_training_run_result(payload: Mapping[str, Any], role: str = "train") -> 
     from amt.schemas.run_result import TrainingRunResult
 
     metrics = dict(payload.get("val_metrics") or {})
+    config = payload.get("config") or {}
     mapped = {
         "run_id": payload.get("run_id") or payload.get("job_run_id") or "",
         "mlflow_run_id": payload.get("mlflow_run_id") or "",
+        "mlflow_experiment_id": str(payload.get("mlflow_experiment_id") or ""),
         "job_run_id": payload.get("job_run_id"),
         "role": role,
+        "hypothesis_id": str(
+            payload.get("hypothesis_id") or config.get("hypothesis_id") or ""
+        ),
         "config": payload.get("config"),
         "config_hash": payload.get("config_hash") or "",
-        "family": str((payload.get("config") or {}).get("model", {}).get("family", "")),
+        "family": str(
+            (config.get("model") or {}).get("family") or config.get("family") or ""
+        ),
         "train_metrics": dict(payload.get("train_metrics") or {}),
         "validation_metrics": metrics,
         "cohort_metrics": dict(payload.get("cohort_metrics") or {}),

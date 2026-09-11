@@ -35,6 +35,8 @@ amt-job = "amt.jobs.entry:main"
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # `amt.databricks.wheel.build_wheel` falls back to `python -m build`.
+    "build>=1.2",
 ]
 
 [build-system]
