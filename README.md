@@ -70,3 +70,20 @@ uv run pytest -q
 ```
 
 Unit tests never hit the network: they use `LocalMockExecutor` and `FakeLLM`.
+
+## Status / known gaps
+
+The repo was built in a sandbox without PyPI access, so `pytest` has only been run against a
+stdlib shim for `src/amt/jobs` and statically verified elsewhere. First thing to do locally:
+`uv sync --all-extras && uv run ruff check . --fix && uv run ruff format . && uv run pytest -q`.
+
+Known follow-ups (tracked in `docs/PLAN.md` §10 Phase D):
+
+- `config_hash` is computed two ways (`ExperimentConfig.config_hash` excludes prose/ids; the
+  job hashes the whole uploaded dict). Unify on the schema definition in `jobs/entry.py`.
+- Phase-0 reproduction tolerance defaults differ (`1e-6` in jobs vs `1e-3` in `Phase0Result`);
+  pass the contract's tolerance through the executor.
+- Jobs ignore `EvaluationContract.metrics` when choosing `ks` (falls back to 5/10/20).
+- `Phase1Result.cohort_deltas` is not populated with per-cohort CIs yet.
+- `wheel.ensure_wheel` fast-path probes a wrong filename, so it rebuilds each process.
+- Real Databricks run has not been exercised end-to-end; start with `amt demo seed`.
