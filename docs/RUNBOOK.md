@@ -1,0 +1,256 @@
+# AMT Runbook
+
+Operating guide for running an experiment campaign with the Automated Model Trainer. For
+what the system is and why it is shaped this way, see `SPEC.md` and `PLAN.md`; for a visual
+map, open `campaign-map.html`.
+
+## 1. One-time setup
+
+### 1.1 Databricks service principal
+
+AMT never runs as a user. Create (or reuse) a service principal and grant it:
+
+| Resource | Grant | Why |
+|---|---|---|
+| SQL warehouse (`DATABRICKS_WAREHOUSE_ID`) | `CAN USE` | Stage 1 read-only data probing |
+| Source tables | `SELECT` | Probing + split materialization |
+| `{catalog}.{schema}` | `USE SCHEMA`, `CREATE TABLE`, `MODIFY` | Writes `split_train/validation/qa` |
+| `{catalog}.{schema}` volume `amt_artifacts` | `READ VOLUME`, `WRITE VOLUME` | Wheel + JSON payload uploads |
+| Workspace folder `/Shared/amt` | `CAN MANAGE` | MLflow experiments |
+| Cluster policy or existing cluster | create / attach | Job compute |
+| UC model registry (optional) | `CREATE MODEL` on schema | `amt promote` on PASS |
+
+Generate an OAuth secret for the principal (Workspace admin → Service principals → Secrets).
+
+Optional hardening: a second principal for QA jobs with `SELECT` on `split_qa` only. Not wired
+by default; see `PLAN.md` §9.
+
+### 1.2 Local environment
+
+```bash
+git clone <repo> && cd automated-model-trainer
+uv sync --all-extras
+cp .env.example .env      # fill in values below
+```
+
+| Variable | Required | Notes |
+|---|---|---|
+| `DATABRICKS_HOST` | yes | `https://adb-…azuredatabricks.net` (no trailing slash) |
+| `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` | yes | Service-principal OAuth M2M |
+| `DATABRICKS_WAREHOUSE_ID` | yes | SQL warehouse for Stage 1 probing |
+| `ANTHROPIC_API_KEY` | yes | Agents run locally |
+| `AMT_CATALOG` / `AMT_SCHEMA` | yes | Where splits are materialized |
+| `AMT_VOLUME_PATH` | yes | `/Volumes/{catalog}/{schema}/amt_artifacts` |
+| `AMT_EXISTING_CLUSTER_ID` | one of | Reuse a running cluster (fastest iteration) |
+| `AMT_SPARK_VERSION` / `AMT_NODE_TYPE_ID` / `AMT_NUM_WORKERS` | one of | Or a per-run job cluster |
+| `AMT_MLFLOW_EXPERIMENT_ROOT` | no | Default `/Shared/amt` |
+| `AMT_*_MODEL` | no | Per-agent Claude model overrides |
+| `AMT_CHECKPOINT_DB` | no | Default `~/.amt/checkpoints.sqlite` |
+
+Smoke-check auth before anything else:
+
+```bash
+uv run python -c "from amt.databricks.client import get_client; print(get_client().current_user.me().user_name)"
+```
+
+### 1.3 Dry run without Databricks or an LLM
+
+```bash
+uv run amt start "Improve homepage row ranking" -c dryrun --mock
+uv run amt approve dryrun --mock     # HC2
+uv run amt approve dryrun --mock     # HC3 → autonomous → stops at HC4
+uv run amt report dryrun --mock
+uv run amt promote dryrun --mock
+```
+
+If this completes, the orchestrator is healthy. Everything after this point is configuration
+and data.
+
+### 1.4 Optional: synthetic data
+
+```bash
+uv run amt demo seed --users 5000 --items 2000
+```
+
+Writes `{catalog}.{schema}.demo_interactions` (`user_id, item_id, ts, item_genre`). Use it for
+a first real campaign end-to-end before pointing at production tables.
+
+## 2. Running a campaign
+
+A campaign is one frozen question. Its id is the LangGraph thread id, so pick something you
+can find later in MLflow: `hp-rows-seq-2026q3`, not `test1`.
+
+### 2.1 Start — HC1
+
+```bash
+uv run amt start "<problem>" -c <campaign> \
+  --max-iterations 6 --max-hypotheses 2 --max-compute-minutes 240
+```
+
+Write the problem the way you would brief a new ML engineer. Include:
+
+- the product surface and the decision the model makes there;
+- the source tables you believe are relevant (fully qualified);
+- the product metric you actually care about;
+- the current baseline, if one exists;
+- constraints (latency, cold-start, fairness, catalog rules).
+
+The Problem Specification Agent probes the tables you name (schema, volume, freshness, label
+availability, leakage) via read-only SQL, drafts a `ProblemSpec`, and the CLI stops at HC2.
+
+The budget flags are hard stops enforced by routing, not suggestions to the agent.
+
+### 2.2 HC2 — approve the ProblemSpec
+
+The CLI prints the spec as JSON. Check, in this order:
+
+1. Decision and target — is this the prediction the product needs?
+2. Data sources — right tables, right grain, right join keys, right timestamp column?
+3. Label construction — does it match how the product defines success, without leakage?
+4. Offline metric — is the primary metric one that plausibly moves the product metric?
+5. Baseline — is it the thing you'd actually have to beat?
+
+```bash
+uv run amt approve <campaign>
+uv run amt reject <campaign> -m "Label should be completion >= 70%, not any play. Exclude autoplay events."
+```
+
+Reject as many times as needed; each rejection re-runs Stage 1 with your feedback. Once
+approved, the spec is frozen for the campaign.
+
+### 2.3 HC3 — approve the EvaluationContract
+
+After HC2 the system drafts the contract and materializes the three splits as Delta tables,
+then stops. Check:
+
+1. Temporal boundaries — train / validation / QA windows don't overlap and the QA window is
+   recent enough to matter.
+2. Population eligibility and exclusions — bots, internal users, min-interaction thresholds.
+3. Split references — `delta_version`, `row_count`, `membership_hash` are all present.
+4. Metric definitions and `harness_version` — matches what you expect to report.
+5. Acceptance criteria — the bar QA will hold the champion to. Set it now; it cannot move
+   later.
+
+```bash
+uv run amt approve <campaign>
+```
+
+Approval stamps `contract_hash`. From here to HC4 the campaign is autonomous.
+
+If you reject at HC3 the splits are re-materialized. If you later realize the contract is wrong
+(after training has started), do not edit anything — start a new campaign. That is by design.
+
+### 2.4 Autonomous phase — what to watch
+
+The CLI blocks while jobs run. In a second terminal:
+
+```bash
+uv run amt status <campaign>
+```
+
+Key fields: `stage`, `current_hypothesis_id`, `budget` (iterations used / max), length of
+`experiment_history`, `hypothesis_champions`, `frozen_champion`.
+
+In Databricks, open MLflow experiment `/Shared/amt/<campaign>`. Useful filters:
+
+```
+tags."amt.campaign_id" = '<campaign>' and tags."amt.role" = 'train'
+tags."amt.role" = 'qa1'
+```
+
+Every run carries `amt.hypothesis_id`, `amt.contract_hash`, `amt.config_hash`,
+`amt.harness_version`. Each run's `result.json` artifact is what the orchestrator saw.
+
+Typical wall-clock: baseline 5–10 min, each training iteration 10–40 min depending on cluster
+and model family, QA phases 5–15 min each.
+
+### 2.5 HC4 — read the conclusion and decide
+
+```bash
+uv run amt report <campaign>
+```
+
+Prints the Scientific Conclusion and the QA decision. Read it as a paper, not a scoreboard:
+
+| QA decision | What it means | Your move |
+|---|---|---|
+| `PASS` | Frozen champion beat baseline on the untouched QA split within predefined criteria | `amt promote` → registers UC model `{catalog}.{schema}.amt_<campaign>` with alias `candidate`; plan an online A/B or shadow test |
+| `FAIL_HYPOTHESIS` | Won on validation, did not generalize | Record it. Do **not** rerun the same hypothesis with tweaks against this QA split. New hypothesis → new campaign |
+| `SPEC_REVIEW` | QA surfaced evidence the labels / population / metrics are wrong | Fix the spec or contract in a **new** campaign; this one is closed |
+| `INVALID_EXPERIMENT` (terminal) | Phase 0 failed three times on a technical defect | Fix the artifact/inference bug in code, then start a new campaign |
+
+```bash
+uv run amt promote <campaign>                          # PASS only
+uv run amt promote <campaign> --model-name main.recsys.homepage_ranker
+```
+
+A negative result is a finished campaign. The MLflow final run holds the report either way.
+
+## 3. Interruptions and recovery
+
+| Situation | Action |
+|---|---|
+| Laptop closed / CLI killed mid-run | `uv run amt resume <campaign>`. State is checkpointed after every node; the in-flight Databricks job is re-polled or re-submitted. |
+| Waiting on you but you forgot which checkpoint | `uv run amt status <campaign>` prints `awaiting HC*`. |
+| Databricks job failed (cluster, quota, OOM) | Fix the cause; `amt resume`. The trainer sees `status=failed` in the result and adapts (smaller batch, fewer layers). Three consecutive failures count against the iteration budget. |
+| Auth error (`401`, `invalid_client`) | Rotate the SP secret, update `.env`, `amt resume`. |
+| Wheel upload fails | Check `AMT_VOLUME_PATH` exists and SP has `WRITE VOLUME`. |
+| Phase 0 `INVALID_EXPERIMENT` once or twice | Normal — usually a serialization or schema-signature issue. The system fixes plumbing and retries automatically. Only three strikes is terminal. |
+| You want to change the contract | You can't. `amt start` a new campaign. |
+| Checkpoint DB corrupted | Delete `~/.amt/checkpoints.sqlite`; the campaign is lost locally but every run remains in MLflow. |
+
+## 4. Interpreting MLflow
+
+| Tag `amt.role` | Split(s) read | Look at |
+|---|---|---|
+| `baseline` | train, validation | `val/*` — your reference numbers |
+| `train` | train, validation | `val/<primary>`, `train/*`, `val/cohort/*`, per-epoch curves; `config.yaml` |
+| `qa0` | validation subset | `checks` in `result.json`; `reproduction_deltas` should be ~0 |
+| `qa1` | qa | `paired_deltas.<metric>.{mean,ci_low,ci_high,frac_improved}` — the CI excluding 0 is the claim |
+| `final` | — | `conclusion.md`, `problem_spec.json`, `evaluation_contract.json`, QA metrics |
+
+Metric names: `recall@k`, `ndcg@k`, `hitrate@k`, `mrr@k`, `coverage@k` with k ∈ {5, 10, 20}
+by default. Cohort keys look like `history_length=cold_start`, `recency=recency_0_7d`.
+
+## 5. Things the system will refuse to do
+
+These are enforced in code (routing, `SplitGuard`, hash assertions). If you hit one, the fix is
+a new campaign, not a workaround.
+
+- Run a training or baseline job with `qa` in its allowed splits.
+- Run QA before exactly one `FrozenChampion` exists.
+- Re-enter the trainer after freeze.
+- Continue after `contract_hash` changes.
+- Exceed `--max-iterations` or `--max-compute-minutes`.
+- Retry Phase 0 more than three times.
+
+## 6. Cost and time guardrails
+
+- Start with `--max-hypotheses 1 --max-iterations 4` and an existing small cluster; widen once
+  the first campaign completes.
+- Prefer `AMT_EXISTING_CLUSTER_ID` during development — job-cluster spin-up adds ~5 min per run.
+- The Problem Specification Agent is capped at `AMT_MAX_PROBE_STEPS` (default 8) SQL probes.
+- Per-agent models can be downgraded via `AMT_*_MODEL` for cheap rehearsal campaigns.
+
+## 7. Adding a model family
+
+1. Implement `fit / recommend / pyfunc wrapper` in `src/amt/jobs/models/<family>.py`
+   following `sasrec.py`.
+2. Register it in `src/amt/jobs/models/registry.py`.
+3. Add it to the Planner's permitted changes in the campaign's ExperimentPlan (the agent reads
+   the registry to know what exists).
+4. Unit-test it under `tests/unit/test_models.py`; no Spark or Databricks needed.
+5. Bump nothing in the harness — evaluation is model-agnostic by design.
+
+## 8. Quick reference
+
+```bash
+amt start "<problem>" -c <id> [--max-iterations N] [--max-hypotheses N] [--max-compute-minutes M] [--mock]
+amt approve <id>                 # HC2 / HC3
+amt reject  <id> -m "<feedback>" # HC2 / HC3, re-runs the stage
+amt status  <id>                 # compact state + which checkpoint is pending
+amt resume  <id>                 # continue after crash / kill
+amt report  <id>                 # Scientific Conclusion + MLflow refs (HC4)
+amt promote <id> [--model-name <uc.name>]   # HC4 decision; registers on PASS
+amt demo seed [--users N --items N]
+```
