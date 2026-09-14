@@ -69,19 +69,34 @@ class Settings(BaseSettings):
         default="databricks", validation_alias=AliasChoices("MLFLOW_TRACKING_URI")
     )
 
-    # --- Agent models --------------------------------------------------------------
+    # --- Agent models: ``provider:model_id`` (see ``amt.llm``) ----------------------
     planner_model: str = Field(
-        default="claude-opus-5", validation_alias=AliasChoices("AMT_PLANNER_MODEL")
+        default="anthropic:claude-opus-5", validation_alias=AliasChoices("AMT_PLANNER_MODEL")
     )
     trainer_model: str = Field(
-        default="claude-opus-5", validation_alias=AliasChoices("AMT_TRAINER_MODEL")
+        default="anthropic:claude-opus-5", validation_alias=AliasChoices("AMT_TRAINER_MODEL")
     )
-    qa_model: str = Field(default="claude-opus-5", validation_alias=AliasChoices("AMT_QA_MODEL"))
+    qa_model: str = Field(
+        default="anthropic:claude-opus-5", validation_alias=AliasChoices("AMT_QA_MODEL")
+    )
     problem_spec_model: str = Field(
-        default="claude-sonnet-5", validation_alias=AliasChoices("AMT_PROBLEM_SPEC_MODEL")
+        default="anthropic:claude-sonnet-5",
+        validation_alias=AliasChoices("AMT_PROBLEM_SPEC_MODEL"),
     )
-    anthropic_api_key: str | None = Field(
-        default=None, validation_alias=AliasChoices("ANTHROPIC_API_KEY")
+    # One credential pair for every provider; vendor names are accepted so an existing
+    # single-provider ``.env`` keeps working.
+    llm_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "AMT_LLM_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "HF_TOKEN",
+            "HUGGINGFACE_API_KEY",
+        ),
+    )
+    llm_base_url: str | None = Field(
+        default=None, validation_alias=AliasChoices("AMT_LLM_BASE_URL", "OPENAI_BASE_URL")
     )
     llm_max_retries: int = Field(default=3, validation_alias=AliasChoices("AMT_LLM_MAX_RETRIES"))
     llm_temperature: float = Field(

@@ -38,13 +38,14 @@ cp .env.example .env      # fill in values below
 | `DATABRICKS_HOST` | yes | `https://adb-…azuredatabricks.net` (no trailing slash) |
 | `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` | yes | Service-principal OAuth M2M |
 | `DATABRICKS_WAREHOUSE_ID` | yes | SQL warehouse for Stage 1 probing |
-| `ANTHROPIC_API_KEY` | yes | Agents run locally |
+| `AMT_LLM_API_KEY` | yes | Agents run locally against whichever LLM provider you configure |
+| `AMT_LLM_BASE_URL` | some | Required for `huggingface` / `openai-compat` models; omit for hosted OpenAI and Anthropic |
 | `AMT_CATALOG` / `AMT_SCHEMA` | yes | Where splits are materialized |
 | `AMT_VOLUME_PATH` | yes | `/Volumes/{catalog}/{schema}/amt_artifacts` |
 | `AMT_EXISTING_CLUSTER_ID` | one of | Reuse a running cluster (fastest iteration) |
 | `AMT_SPARK_VERSION` / `AMT_NODE_TYPE_ID` / `AMT_NUM_WORKERS` | one of | Or a per-run job cluster |
 | `AMT_MLFLOW_EXPERIMENT_ROOT` | no | Default `/Shared/amt` |
-| `AMT_*_MODEL` | no | Per-agent Claude model overrides |
+| `AMT_*_MODEL` | no | Per-agent model as `provider:model_id` (see §1.2.1) |
 | `AMT_CHECKPOINT_DB` | no | Default `~/.amt/checkpoints.sqlite` |
 
 Smoke-check auth before anything else:
@@ -52,6 +53,34 @@ Smoke-check auth before anything else:
 ```bash
 uv run python -c "from amt.databricks.client import get_client; print(get_client().current_user.me().user_name)"
 ```
+
+#### 1.2.1 Choosing an LLM provider
+
+AMT is provider-agnostic: the agents only need a chat model that can return structured
+output. Name each agent's model as `provider:model_id` and the orchestrator builds the right
+client. Nothing else in a campaign changes when you switch providers.
+
+| Provider prefix | Reaches | `AMT_LLM_BASE_URL` |
+|---|---|---|
+| `openai` | Hosted OpenAI (or an OpenAI-shaped proxy if you set a base URL) | optional |
+| `anthropic` | Hosted Anthropic | ignored |
+| `huggingface` | A Hugging Face Inference Endpoint | required |
+| `openai-compat` | Any other OpenAI-compatible server: vLLM, TGI, Databricks model serving | required |
+
+```bash
+AMT_LLM_API_KEY=<your provider key>
+AMT_PLANNER_MODEL=openai:gpt-4.1
+AMT_PROBLEM_SPEC_MODEL=anthropic:claude-sonnet-5      # mixing providers is fine
+
+# Self-hosted or Hugging Face instead:
+AMT_LLM_BASE_URL=https://<endpoint>/v1
+AMT_QA_MODEL=huggingface:meta-llama/Llama-3.1-70B-Instruct
+```
+
+Unprefixed names still resolve (`claude-*` to Anthropic, `gpt-*` to OpenAI, `org/name` to
+Hugging Face), but prefer the explicit form. Whichever provider you pick must support
+structured output reliably — the agents fail the stage rather than accept a malformed
+contract.
 
 ### 1.3 Dry run without Databricks or an LLM
 
@@ -230,7 +259,8 @@ a new campaign, not a workaround.
   the first campaign completes.
 - Prefer `AMT_EXISTING_CLUSTER_ID` during development — job-cluster spin-up adds ~5 min per run.
 - The Problem Specification Agent is capped at `AMT_MAX_PROBE_STEPS` (default 8) SQL probes.
-- Per-agent models can be downgraded via `AMT_*_MODEL` for cheap rehearsal campaigns.
+- Per-agent models can be downgraded — or pointed at a cheaper provider — via `AMT_*_MODEL`
+  for rehearsal campaigns.
 
 ## 7. Adding a model family
 

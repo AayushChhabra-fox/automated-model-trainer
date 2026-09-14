@@ -9,7 +9,7 @@ See `docs/SPEC.md` (normative product spec) and `docs/PLAN.md` (architecture).
 
 ```bash
 uv sync --all-extras            # or: uv sync   (skips the heavy `jobs` extra)
-cp .env.example .env            # fill in Databricks + Anthropic credentials
+cp .env.example .env            # fill in Databricks credentials + an LLM provider key
 uv run amt --help
 ```
 
@@ -45,6 +45,7 @@ Everything between HC3 and HC4 runs autonomously inside the agreed experiment bu
 
 ```
 src/amt/schemas/    Pydantic v2 contracts — the only cross-agent language
+src/amt/llm.py      provider:model_id -> chat model; the only place a provider SDK is imported
 src/amt/agents/     LLM layers: pure functions (inputs) -> schema
 src/amt/graph/      CampaignState, nodes (side effects), routing (hard rules)
 src/amt/executor/   Executor Protocol, DatabricksExecutor, LocalMockExecutor

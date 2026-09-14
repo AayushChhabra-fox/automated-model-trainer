@@ -7,7 +7,6 @@ schema. They never touch Databricks, MLflow or campaign state — nodes do that.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from functools import cache
 from pathlib import Path
 from typing import Any, TypeVar
@@ -15,12 +14,10 @@ from typing import Any, TypeVar
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
+from amt.llm import LLMFactory, make_llm_factory
 from amt.settings import Settings, get_settings
 
 T = TypeVar("T", bound=BaseModel)
-
-#: ``(model_name) -> chat model`` with ``.with_structured_output(PydanticModel)``.
-LLMFactory = Callable[[str], Any]
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
 
@@ -36,25 +33,6 @@ def load_prompt(name: str) -> str:
     if not path.exists():
         raise AgentError(f"Prompt not found: {path}")
     return path.read_text(encoding="utf-8")
-
-
-def make_llm_factory(settings: Settings | None = None) -> LLMFactory:
-    """Default factory: ``ChatAnthropic`` per agent model name."""
-    settings = settings or get_settings()
-
-    def factory(model: str) -> Any:
-        from langchain_anthropic import ChatAnthropic  # lazy: no API key needed for tests
-
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "temperature": settings.llm_temperature,
-            "max_retries": settings.llm_max_retries,
-        }
-        if settings.anthropic_api_key:
-            kwargs["api_key"] = settings.anthropic_api_key
-        return ChatAnthropic(**kwargs)
-
-    return factory
 
 
 def render(value: Any) -> str:
@@ -82,7 +60,7 @@ def render_context(context: dict[str, Any]) -> str:
 
 
 class StructuredAgent:
-    """Wraps ``ChatAnthropic.with_structured_output(schema)`` behind a testable seam."""
+    """Wraps ``chat_model.with_structured_output(schema)`` behind a testable seam."""
 
     def __init__(
         self,

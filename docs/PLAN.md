@@ -7,7 +7,7 @@ Normative spec: `docs/SPEC.md`. This document translates it into a concrete buil
 | Concern | Decision |
 |---|---|
 | Orchestrator | **LangGraph** (`StateGraph`) with `SqliteSaver` checkpointer for resumability. Human checkpoints use `interrupt()`; CLI resumes with `Command(resume=...)`. |
-| Agent LLMs | `langchain-anthropic` `ChatAnthropic` with `.with_structured_output(PydanticModel)`. Model per agent configurable in `settings`; default `claude-opus-5` for Planner/Trainer/QA reasoning, `claude-sonnet-5` for ProblemSpec data-probing chatter. |
+| Agent LLMs | Provider-agnostic: `settings` names each agent's model as `provider:model_id` and `amt.llm` builds the client — `ChatAnthropic` for `anthropic`, `ChatOpenAI` for `openai`, `huggingface` and `openai-compat` (any OpenAI-compatible endpoint: HF Inference Endpoints, vLLM, TGI, Databricks serving) via `AMT_LLM_BASE_URL`. All providers go through `.with_structured_output(PydanticModel)`, so agents never learn which vendor answered. Defaults: `anthropic:claude-opus-5` for Planner/Trainer/QA reasoning, `anthropic:claude-sonnet-5` for ProblemSpec data-probing chatter. One credential pair (`AMT_LLM_API_KEY`, `AMT_LLM_BASE_URL`) covers every provider. |
 | Where agents run | Local CLI (`amt`). Agents never compute training themselves. |
 | Where compute runs | **Databricks Jobs** (one-time `jobs.submit` runs, `python_wheel_task`). Wheel built from this repo and uploaded to a UC Volume. |
 | Auth | Databricks SDK unified auth via env: `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` (OAuth M2M, service principal). No secrets in repo. |
@@ -32,6 +32,7 @@ automated-model-trainer/
 ├── src/amt/
 │   ├── __init__.py
 │   ├── settings.py             # pydantic-settings; env-driven
+│   ├── llm.py                  # provider:model_id -> chat model (anthropic / openai / hf / compat)
 │   ├── cli.py                  # Typer app: init, start, approve, reject, resume, status, report, demo
 │   ├── schemas/                # Pydantic v2 contracts (the only cross-agent language)
 │   │   ├── problem_spec.py

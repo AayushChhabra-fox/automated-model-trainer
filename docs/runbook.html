@@ -83,17 +83,37 @@ cp .env.example .env      # then fill in the values below</code></pre>
 <tr><td><code>DATABRICKS_HOST</code></td><td>yes</td><td><code>https://adb-…azuredatabricks.net</code>, no trailing slash</td></tr>
 <tr><td><code>DATABRICKS_CLIENT_ID</code> / <code>DATABRICKS_CLIENT_SECRET</code></td><td>yes</td><td>Service-principal OAuth M2M</td></tr>
 <tr><td><code>DATABRICKS_WAREHOUSE_ID</code></td><td>yes</td><td>SQL warehouse for Stage 1 probing</td></tr>
-<tr><td><code>ANTHROPIC_API_KEY</code></td><td>yes</td><td>Agents run on your machine</td></tr>
+<tr><td><code>AMT_LLM_API_KEY</code></td><td>yes</td><td>Agents run on your machine, against whichever LLM provider you configure</td></tr>
+<tr><td><code>AMT_LLM_BASE_URL</code></td><td>some</td><td>Required for <code>huggingface</code> / <code>openai-compat</code> models; omit for hosted OpenAI and Anthropic</td></tr>
 <tr><td><code>AMT_CATALOG</code> / <code>AMT_SCHEMA</code></td><td>yes</td><td>Where splits are materialized</td></tr>
 <tr><td><code>AMT_VOLUME_PATH</code></td><td>yes</td><td><code>/Volumes/{catalog}/{schema}/amt_artifacts</code></td></tr>
 <tr><td><code>AMT_EXISTING_CLUSTER_ID</code></td><td>one of</td><td>Reuse a running cluster — fastest iteration</td></tr>
 <tr><td><code>AMT_SPARK_VERSION</code> / <code>AMT_NODE_TYPE_ID</code> / <code>AMT_NUM_WORKERS</code></td><td>one of</td><td>Or a per-run job cluster</td></tr>
 <tr><td><code>AMT_MLFLOW_EXPERIMENT_ROOT</code></td><td>no</td><td>Default <code>/Shared/amt</code></td></tr>
-<tr><td><code>AMT_*_MODEL</code></td><td>no</td><td>Per-agent Claude model overrides</td></tr>
+<tr><td><code>AMT_*_MODEL</code></td><td>no</td><td>Per-agent model as <code>provider:model_id</code> — see 1.2.1</td></tr>
 <tr><td><code>AMT_CHECKPOINT_DB</code></td><td>no</td><td>Default <code>~/.amt/checkpoints.sqlite</code></td></tr>
 </tbody></table></div>
 <p>Smoke-check auth before anything else:</p>
 <pre><code>uv run python -c "from amt.databricks.client import get_client; print(get_client().current_user.me().user_name)"</code></pre>
+
+<h3>1.2.1 Choosing an LLM provider</h3>
+<p>AMT is provider-agnostic: the agents only need a chat model that can return structured output. Name each agent's model as <code>provider:model_id</code> and the orchestrator builds the right client. Nothing else in a campaign changes when you switch providers.</p>
+<div class="tw"><table>
+<thead><tr><th>Provider prefix</th><th>Reaches</th><th><code>AMT_LLM_BASE_URL</code></th></tr></thead>
+<tbody>
+<tr><td><code>openai</code></td><td>Hosted OpenAI, or an OpenAI-shaped proxy if you set a base URL</td><td>optional</td></tr>
+<tr><td><code>anthropic</code></td><td>Hosted Anthropic</td><td>ignored</td></tr>
+<tr><td><code>huggingface</code></td><td>A Hugging Face Inference Endpoint</td><td>required</td></tr>
+<tr><td><code>openai-compat</code></td><td>Any other OpenAI-compatible server: vLLM, TGI, Databricks model serving</td><td>required</td></tr>
+</tbody></table></div>
+<pre><code>AMT_LLM_API_KEY=&lt;your provider key&gt;
+AMT_PLANNER_MODEL=openai:gpt-4.1
+AMT_PROBLEM_SPEC_MODEL=anthropic:claude-sonnet-5      # mixing providers is fine
+
+# Self-hosted or Hugging Face instead:
+AMT_LLM_BASE_URL=https://&lt;endpoint&gt;/v1
+AMT_QA_MODEL=huggingface:meta-llama/Llama-3.1-70B-Instruct</code></pre>
+<p>Unprefixed names still resolve (<code>claude-*</code> to Anthropic, <code>gpt-*</code> to OpenAI, <code>org/name</code> to Hugging Face), but prefer the explicit form. Whichever provider you pick must support structured output reliably — the agents fail the stage rather than accept a malformed contract.</p>
 
 <h3>1.3 Dry run — no Databricks, no LLM</h3>
 <pre><code>uv run amt start "Improve homepage row ranking" -c dryrun --mock
@@ -226,7 +246,7 @@ uv run amt promote &lt;campaign&gt; --model-name main.recsys.homepage_ranker</co
 <li>Start with <code>--max-hypotheses 1 --max-iterations 4</code> and an existing small cluster; widen once the first campaign completes.</li>
 <li>Prefer <code>AMT_EXISTING_CLUSTER_ID</code> during development — job-cluster spin-up adds ~5 min per run.</li>
 <li>The Problem Specification Agent is capped at <code>AMT_MAX_PROBE_STEPS</code> (default 8) SQL probes.</li>
-<li>Per-agent models can be downgraded via <code>AMT_*_MODEL</code> for cheap rehearsal campaigns.</li>
+<li>Per-agent models can be downgraded — or pointed at a cheaper provider — via <code>AMT_*_MODEL</code> for rehearsal campaigns.</li>
 </ul>
 
 <h2 id="family"><span class="n">7</span>Adding a model family</h2>

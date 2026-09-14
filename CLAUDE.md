@@ -14,7 +14,8 @@ Autonomous ML experimentation system on Databricks: LangGraph orchestrator (loca
 - Split access in jobs goes through `SplitGuard` only. Train/validation jobs never receive `qa` in `allowed_splits`.
 - Every node and job asserts `contract_hash` matches the frozen EvaluationContract.
 - Never duplicate MLflow detail into `CampaignState`; store IDs/references.
-- Secrets only via env (`DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`, `ANTHROPIC_API_KEY`).
+- Secrets only via env (`DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`, `AMT_LLM_API_KEY`).
+- Agents are provider-agnostic: models are named `provider:model_id` and built in `src/amt/llm.py`. Never import a provider SDK outside that module.
 
 ## Commands
 ```

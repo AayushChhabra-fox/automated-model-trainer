@@ -54,7 +54,7 @@ def _find_all(pattern: str, text: str) -> list[str]:
 
 
 class FakeLLM:
-    """Stands in for ``ChatAnthropic``; returns canned instances of the requested schema."""
+    """Stands in for any provider's chat model; returns canned instances of the schema."""
 
     def __init__(self, responder: CannedResponder, model: str = "fake-model") -> None:
         self.responder = responder
