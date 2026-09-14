@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import typer
@@ -93,13 +94,18 @@ def _report_position(graph: Any, campaign: str) -> None:
     payload = _pending_interrupt(graph, campaign)
     state = _state(graph, campaign)
     if payload:
+        body, truncated = _render_checkpoint(payload)
         console.print(
             Panel(
-                _render_checkpoint(payload),
+                body,
                 title=f"{payload.get('checkpoint')} — {payload.get('title')}",
                 border_style="yellow",
             )
         )
+        if truncated:
+            console.print(
+                f"[dim]preview truncated; `amt show {campaign}` prints the whole document.[/dim]"
+            )
         console.print(
             "[yellow]awaiting approval[/yellow] — " + str(payload.get("instructions", ""))
         )
@@ -110,11 +116,28 @@ def _report_position(graph: Any, campaign: str) -> None:
     console.print(f"[green]campaign {campaign}[/green] status={status} qa_decision={decision}")
 
 
-def _render_checkpoint(payload: dict) -> str:
+#: A checkpoint document can run to hundreds of KB once probe rows are included, which
+#: no terminal panel can usefully show. The panel is a preview; `amt show` is the review.
+PREVIEW_CHARS = 8000
+
+
+def _clip(text: str) -> tuple[str, bool]:
+    """``(text, was_truncated)`` for the checkpoint preview."""
+    if len(text) <= PREVIEW_CHARS:
+        return text, False
+    return text[:PREVIEW_CHARS], True
+
+
+def checkpoint_document(payload: dict) -> Any:
+    """The part of an interrupt payload a human actually decides on."""
     for key in ("problem_spec", "evaluation_contract", "feature_fit", "conclusion"):
         if payload.get(key):
-            return json.dumps(payload[key], indent=2, default=str)[:8000]
-    return json.dumps(payload, indent=2, default=str)[:4000]
+            return payload[key]
+    return payload
+
+
+def _render_checkpoint(payload: dict) -> tuple[str, bool]:
+    return _clip(json.dumps(checkpoint_document(payload), indent=2, default=str))
 
 
 # --- commands ----------------------------------------------------------------------
@@ -202,6 +225,40 @@ def status(
         console.print(
             f"[yellow]awaiting {payload.get('checkpoint')}[/yellow]: {payload.get('title')}"
         )
+
+
+@app.command()
+def show(
+    campaign: str = typer.Argument(..., help="Campaign id."),
+    out: str = typer.Option("", "--out", "-o", help="Write to this file instead of stdout."),
+    probes: bool = typer.Option(
+        False, "--probes", help="Keep the raw probe rows (large; omitted by default)."
+    ),
+    mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
+) -> None:
+    """Print the checkpoint document in full — the panel at a checkpoint is only a preview."""
+    graph = _build(mock, campaign)
+    state = _state(graph, campaign)
+    if not state:
+        console.print(f"[red]No campaign named {campaign!r}.[/red]")
+        raise typer.Exit(code=1)
+    payload = _pending_interrupt(graph, campaign)
+    if payload is None:
+        console.print("[yellow]No pending checkpoint; showing the latest ProblemSpec.[/yellow]")
+        spec = state.get("problem_spec")
+        if spec is None:
+            raise typer.Exit(code=0)
+        document: Any = spec.model_dump(mode="json")
+    else:
+        document = checkpoint_document(payload)
+    if not probes and isinstance(document, dict):
+        document.pop("investigation_notes", None)
+    text = json.dumps(document, indent=2, default=str)
+    if out:
+        Path(out).expanduser().write_text(text, encoding="utf-8")
+        console.print(f"[green]wrote[/green] {len(text)} chars to {out}")
+        return
+    print(text)
 
 
 @app.command()

@@ -35,6 +35,11 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("DATABRICKS_CLIENT_SECRET", "databricks_client_secret"),
     )
+    # A PAT authenticates as a human, so jobs run under that user's Unity Catalog grants.
+    databricks_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DATABRICKS_TOKEN", "databricks_token"),
+    )
     warehouse_id: str | None = Field(
         default=None,
         validation_alias=AliasChoices("DATABRICKS_WAREHOUSE_ID", "AMT_WAREHOUSE_ID"),

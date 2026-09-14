@@ -16,10 +16,15 @@ class DatabricksConfigError(RuntimeError):
 
 
 def _require(settings: Settings) -> None:
+    if not settings.databricks_host:
+        raise DatabricksConfigError(
+            "Missing Databricks configuration: DATABRICKS_HOST. See .env.example."
+        )
+    if settings.databricks_token:
+        return
     missing = [
         name
         for name, value in (
-            ("DATABRICKS_HOST", settings.databricks_host),
             ("DATABRICKS_CLIENT_ID", settings.databricks_client_id),
             ("DATABRICKS_CLIENT_SECRET", settings.databricks_client_secret),
         )
@@ -27,16 +32,30 @@ def _require(settings: Settings) -> None:
     ]
     if missing:
         raise DatabricksConfigError(
-            "Missing Databricks configuration: " + ", ".join(missing) + ". See .env.example."
+            "Missing Databricks configuration: DATABRICKS_TOKEN, or "
+            + " and ".join(missing)
+            + ". See .env.example."
         )
 
 
 def get_workspace_client(settings: Settings | None = None) -> WorkspaceClient:
-    """Build a ``WorkspaceClient`` authenticated as the configured service principal."""
+    """Build a ``WorkspaceClient`` for the configured identity.
+
+    A PAT takes precedence over the service-principal pair: everything AMT submits
+    then runs as that user, under their Unity Catalog grants.
+    """
     settings = settings or get_settings()
     _require(settings)
     from databricks.sdk import WorkspaceClient  # imported lazily: keeps unit tests offline
 
+    if settings.databricks_token:
+        # Pin auth_type so an ambient service-principal env or ~/.databrickscfg profile
+        # cannot make the SDK see two credential sources and refuse to authenticate.
+        return WorkspaceClient(
+            host=settings.databricks_host,
+            token=settings.databricks_token,
+            auth_type="pat",
+        )
     return WorkspaceClient(
         host=settings.databricks_host,
         client_id=settings.databricks_client_id,

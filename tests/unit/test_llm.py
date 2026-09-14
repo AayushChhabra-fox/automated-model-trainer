@@ -6,6 +6,7 @@ import sys
 import types
 
 import pytest
+from pydantic import BaseModel
 
 from amt.llm import (
     ANTHROPIC,
@@ -16,6 +17,7 @@ from amt.llm import (
     build_chat_model,
     make_llm_factory,
     parse_model_ref,
+    structured_output,
 )
 from amt.settings import Settings
 
@@ -162,3 +164,43 @@ def test_default_agent_models_are_provider_qualified() -> None:
 
     for agent in ("planner", "trainer", "qa", "problem_spec"):
         assert parse_model_ref(settings.model_for(agent)).provider == ANTHROPIC
+
+
+class RecordingChatModel:
+    """Records how a schema was bound, the way a provider client would see it."""
+
+    def __init__(self) -> None:
+        self.bound: dict = {}
+
+    def with_structured_output(self, schema: type, **kwargs) -> str:
+        self.bound = {"schema": schema, **kwargs}
+        return "runnable"
+
+
+class OpenSchema(BaseModel):
+    """A contract with an open mapping, which strict JSON schema cannot express."""
+
+    params: dict = {}
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "openai:gpt-4.1",
+        "huggingface:meta-llama/Llama-3.1-70B-Instruct",
+        "openai-compat:my-served-model",
+    ],
+)
+def test_strict_schema_providers_bind_via_tool_calling(model: str) -> None:
+    llm = RecordingChatModel()
+
+    assert structured_output(llm, OpenSchema, model) == "runnable"
+    assert llm.bound == {"schema": OpenSchema, "method": "function_calling"}
+
+
+@pytest.mark.parametrize("model", ["anthropic:claude-opus-5", "", "not-a-model-ref"])
+def test_other_providers_keep_the_default_binding(model: str) -> None:
+    llm = RecordingChatModel()
+
+    assert structured_output(llm, OpenSchema, model) == "runnable"
+    assert llm.bound == {"schema": OpenSchema}

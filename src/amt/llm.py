@@ -28,6 +28,12 @@ PROVIDERS = (ANTHROPIC, OPENAI, HUGGINGFACE, OPENAI_COMPAT)
 #: Providers that are only reachable through an explicitly configured base URL.
 REQUIRES_BASE_URL = (HUGGINGFACE, OPENAI_COMPAT)
 
+#: Providers whose default structured-output path is OpenAI strict JSON schema. Strict
+#: mode rejects any object without ``additionalProperties: false``, which rules out the
+#: open mappings AMT's contracts are built on — search spaces, booster params, probe
+#: rows. Tool calling accepts the same schemas, so those providers are pinned to it.
+STRICT_SCHEMA_PROVIDERS = (OPENAI, HUGGINGFACE, OPENAI_COMPAT)
+
 _PROVIDER_HINT = "use 'provider:model_id', e.g. openai:gpt-4.1 — providers: " + ", ".join(PROVIDERS)
 
 
@@ -107,6 +113,17 @@ def build_chat_model(model: str, settings: Settings | None = None) -> Any:
     if base_url:
         kwargs["base_url"] = base_url
     return ChatOpenAI(**kwargs)
+
+
+def structured_output(llm: Any, schema: type, model: str = "") -> Any:
+    """Bind ``schema`` to ``llm`` by whichever method the provider can honour."""
+    try:
+        provider = parse_model_ref(model).provider
+    except LLMConfigError:
+        provider = ""
+    if provider in STRICT_SCHEMA_PROVIDERS:
+        return llm.with_structured_output(schema, method="function_calling")
+    return llm.with_structured_output(schema)
 
 
 def make_llm_factory(settings: Settings | None = None) -> LLMFactory:

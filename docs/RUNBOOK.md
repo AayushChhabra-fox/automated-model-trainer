@@ -6,9 +6,9 @@ map, open `campaign-map.html`.
 
 ## 1. One-time setup
 
-### 1.1 Databricks service principal
+### 1.1 Databricks identity
 
-AMT never runs as a user. Create (or reuse) a service principal and grant it:
+AMT normally runs as a service principal. Create (or reuse) one and grant it:
 
 | Resource | Grant | Why |
 |---|---|---|
@@ -21,6 +21,13 @@ AMT never runs as a user. Create (or reuse) a service principal and grant it:
 | UC model registry (optional) | `CREATE MODEL` on schema | `amt promote` on PASS |
 
 Generate an OAuth secret for the principal (Workspace admin → Service principals → Secrets).
+
+Running as yourself instead: set `DATABRICKS_TOKEN` to a PAT and it takes precedence over the
+OAuth pair. Every job then runs under your own grants, which is the quickest way onto source
+data a principal cannot reach yet. Two things bite: the PAT needs the `files` scope or Volume
+uploads fail with `does not have required scopes: files`, and an `AMT_EXISTING_CLUSTER_ID`
+in single-user mode must be pinned to the same identity — otherwise the run either cannot
+attach or reads data as the pinned principal.
 
 Optional hardening: a second principal for QA jobs with `SELECT` on `split_qa` only. Not wired
 by default; see `PLAN.md` §9.
@@ -36,7 +43,8 @@ cp .env.example .env      # fill in values below
 | Variable | Required | Notes |
 |---|---|---|
 | `DATABRICKS_HOST` | yes | `https://adb-…azuredatabricks.net` (no trailing slash) |
-| `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` | yes | Service-principal OAuth M2M |
+| `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` | one of | Service-principal OAuth M2M |
+| `DATABRICKS_TOKEN` | one of | PAT (needs the `files` scope); wins over the OAuth pair |
 | `DATABRICKS_WAREHOUSE_ID` | yes | SQL warehouse for Stage 1 probing |
 | `AMT_LLM_API_KEY` | yes | Agents run locally against whichever LLM provider you configure |
 | `AMT_LLM_BASE_URL` | some | Required for `huggingface` / `openai-compat` models; omit for hosted OpenAI and Anthropic |
@@ -48,10 +56,12 @@ cp .env.example .env      # fill in values below
 | `AMT_*_MODEL` | no | Per-agent model as `provider:model_id` (see §1.2.1) |
 | `AMT_CHECKPOINT_DB` | no | Default `~/.amt/checkpoints.sqlite` |
 
-Smoke-check auth before anything else:
+Smoke-check auth before anything else. MLflow reads credentials from the process
+environment rather than from `Settings`, so export `.env` in the shell you run `amt` from:
 
 ```bash
-uv run python -c "from amt.databricks.client import get_client; print(get_client().current_user.me().user_name)"
+set -a && . ./.env && set +a
+uv run python -c "from amt.databricks.client import get_workspace_client; print(get_workspace_client().current_user.me().user_name)"
 ```
 
 #### 1.2.1 Choosing an LLM provider

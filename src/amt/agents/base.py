@@ -14,7 +14,7 @@ from typing import Any, TypeVar
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
-from amt.llm import LLMFactory, make_llm_factory
+from amt.llm import LLMFactory, make_llm_factory, structured_output
 from amt.settings import Settings, get_settings
 
 T = TypeVar("T", bound=BaseModel)
@@ -85,7 +85,7 @@ class StructuredAgent:
             body = f"{instruction}\n\n{body}"
         messages = [SystemMessage(content=self.prompt), HumanMessage(content=body)]
         llm = self._llm_factory(self.model)
-        structured = llm.with_structured_output(self.output_model)
+        structured = structured_output(llm, self.output_model, self.model)
         result = structured.invoke(messages)
         if not isinstance(result, self.output_model):
             raise AgentError(
