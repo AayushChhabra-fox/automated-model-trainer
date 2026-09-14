@@ -243,3 +243,72 @@ def test_multiple_hypotheses_produce_one_final_champion(campaign):
     assert state["frozen_champion"].hypothesis_id in {
         c.hypothesis_id for c in state["hypothesis_champions"]
     }
+
+
+# --- feature/fit checkpoint (booster families) ------------------------------------------------
+def run_tabular_to_hc4(graph, config, campaign_id="test-campaign", reject_first_shape=False):
+    """Same path as :func:`run_to_hc4`, plus the HC_FEATURE gate before any training."""
+    hc2 = start(graph, config, campaign_id)
+    assert hc2 and hc2["checkpoint"] == "HC2"
+    hc3 = resume(graph, config, approved=True)
+    assert hc3 and hc3["checkpoint"] == "HC3"
+
+    hc_feature = resume(graph, config, approved=True)
+    assert hc_feature and hc_feature["checkpoint"] == "HC_FEATURE"
+    if reject_first_shape:
+        hc_feature = resume(graph, config, approved=False, feedback="drop the leaky feature")
+        assert hc_feature and hc_feature["checkpoint"] == "HC_FEATURE"
+    return resume(graph, config, approved=True), hc_feature
+
+
+def test_a_booster_campaign_must_pass_the_feature_checkpoint_before_training(campaign):
+    graph, config, executor, responder = campaign(family="lightgbm_reranker")
+    hc4, hc_feature = run_tabular_to_hc4(graph, config)
+
+    payload = hc_feature["feature_fit"]
+    assert payload["family"] == "lightgbm_reranker"
+    assert payload["feature_recipe"]["feature_columns"]
+    assert hc_feature["feature_fit_hash"]
+
+    assert hc4 and hc4["checkpoint"] == "HC4"
+    state = graph_state(graph, config)
+    assert state["feature_fit_approved"] is True
+    assert state["feature_fit_hash"] == hc_feature["feature_fit_hash"]
+    # Every run went out under the approved shape, and the recipe reached the executor.
+    assert len(executor.training_calls) == 3
+    champion_config = state["frozen_champion"].config
+    assert champion_config.family == "lightgbm_reranker"
+    assert champion_config.feature_recipe is not None
+    assert champion_config.feature_fit_hash == hc_feature["feature_fit_hash"]
+
+
+def test_rejecting_a_shape_redrafts_it_and_blocks_training(campaign):
+    graph, config, executor, responder = campaign(family="xgboost_classifier")
+    hc4, _shape = run_tabular_to_hc4(graph, config, reject_first_shape=True)
+
+    assert hc4 and hc4["checkpoint"] == "HC4"
+    # Two proposals, and nothing was trained until one was approved.
+    assert responder.counts["feature_fit"] == 2
+    first_training = executor.calls.index("run_training")
+    assert executor.calls[:first_training].count("run_training") == 0
+    state = graph_state(graph, config)
+    assert state["feature_fit_approved"] is True
+
+
+def test_hyperparameter_only_iterations_do_not_reopen_the_checkpoint(campaign):
+    graph, config, executor, responder = campaign(family="xgboost_reranker")
+    hc4, _shape = run_tabular_to_hc4(graph, config)
+    assert hc4 and hc4["checkpoint"] == "HC4"
+
+    # One approval covered all three iterations; the recipe never changed.
+    assert responder.counts["feature_fit"] == 1
+    assert len(executor.training_calls) == 3
+    assert len(set(executor.training_calls)) == 3, "each iteration must be a different config"
+
+
+def test_the_fixed_shape_families_never_reach_the_feature_checkpoint(campaign):
+    graph, config, executor, responder = campaign(family="sasrec")
+    hc4 = run_to_hc4(graph, config)
+    assert hc4 and hc4["checkpoint"] == "HC4"
+    assert "feature_fit" not in responder.counts
+    assert graph_state(graph, config)["feature_fit_hash"] == ""

@@ -13,7 +13,7 @@ Normative spec: `docs/SPEC.md`. This document translates it into a concrete buil
 | Auth | Databricks SDK unified auth via env: `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` (OAuth M2M, service principal). No secrets in repo. |
 | SQL access (Stage 1) | Databricks SQL Statement Execution API via SDK against `DATABRICKS_WAREHOUSE_ID`, read-only wrapper (rejects non-SELECT). |
 | Persistence | MLflow (Databricks tracking) for all experiment detail; UC Delta tables only for materialized splits; SQLite checkpoint for orchestration state. |
-| Reference models | `popularity` (baseline) and `sasrec` (candidate family), PyTorch, config-driven. |
+| Reference models | `popularity` (baseline), `sasrec` (PyTorch sequence model), and four gradient-boosting families (`xgboost_classifier`, `xgboost_reranker`, `lightgbm_classifier`, `lightgbm_reranker`) whose inputs come from a human-approved `FeatureRecipe`. All config-driven. |
 | Demo data | Synthetic interaction generator (`amt demo seed`) writing to a UC schema so the pipeline runs before pointing at real tables. |
 | Package mgmt | `uv`, `pyproject.toml`, Python ≥3.10. |
 
@@ -84,7 +84,12 @@ automated-model-trainer/
 │       ├── models/
 │       │   ├── registry.py     # family -> builder
 │       │   ├── popularity.py
-│       │   └── sasrec.py
+│       │   ├── sasrec.py
+│       │   ├── tabular_common.py   # executes an approved FeatureRecipe + FitSpec
+│       │   ├── xgboost_classifier.py
+│       │   ├── xgboost_reranker.py
+│       │   ├── lightgbm_classifier.py
+│       │   └── lightgbm_reranker.py
 │       └── eval/
 │           ├── harness.py      # metrics (recall@k, ndcg@k, mrr, hitrate@k, coverage), versioned
 │           ├── cohorts.py
@@ -114,6 +119,10 @@ class CampaignState(TypedDict, total=False):
     hypotheses: list[Hypothesis]       # prioritized backlog (ids + short text)
     current_hypothesis_id: str | None
     experiment_plan: ExperimentPlan | None
+    approved_feature_recipe: FeatureRecipe | None   # booster families only
+    approved_fit_spec: FitSpec | None
+    feature_fit_hash: str              # recipe + structural FitSpec, booster_params excluded
+    feature_fit_approved: bool
     experiment_history: list[RunSummary]   # compact: run_id, config_hash, primary metric, verdict
     budget: ExperimentBudget           # iterations_used/max, compute_used/max
     hypothesis_champions: list[HypothesisChampion]
@@ -133,7 +142,11 @@ START → problem_spec → [interrupt HC2] ─rejected→ problem_spec
                             ─rejected→ evaluation_contract
                             └approved→ run_baseline → planner_select_hypothesis
 planner_select_hypothesis ─no hypotheses left / budget→ planner_final_champion
+                          ─tabular family, shape not approved→ planner_feature_fit
                           └→ trainer_propose → execute_training → trainer_interpret
+planner_feature_fit → [interrupt HC_FEATURE] ─rejected→ planner_feature_fit
+                                             └approved→ trainer_propose
+trainer_propose ─feature_fit_hash != approved→ planner_feature_fit
 trainer_interpret ─continue→ trainer_propose
                   └converged→ select_hypothesis_champion → planner_select_hypothesis
 planner_final_champion → freeze_champion → qa_phase0
@@ -142,7 +155,9 @@ qa_phase0 ─INVALID_EXPERIMENT (fixable, attempts<3)→ qa_phase0
 qa_decision = SPEC_REVIEW → conclusion (status=spec_review) → [interrupt HC4] → END
 ```
 
-Rules enforced in `routing.py`, not prompts: trainer loop cannot exceed `plan.max_iterations`; `execute_training` refuses if `contract_hash` differs from the one stamped at HC3; `qa_*` refuses if `frozen_champion is None` or more than one champion.
+Rules enforced in `routing.py`, not prompts: trainer loop cannot exceed `plan.max_iterations`; `execute_training` refuses if `contract_hash` differs from the one stamped at HC3; `qa_*` refuses if `frozen_champion is None` or more than one champion; `execute_training` refuses a booster family whose `feature_fit_hash` is not the one approved at HC_FEATURE.
+
+HC_FEATURE gates the declarative feature/fit shape of the booster families: one approval per hypothesis, hyperparameter-only iterations run unattended, and any structural change to the `FeatureRecipe` or `FitSpec` re-enters the checkpoint. `popularity` and `sasrec` skip it.
 
 ## 5. Executor contract
 
@@ -180,6 +195,8 @@ amt start "Improve homepage row ranking for Tubi..." --campaign my-campaign
 amt approve my-campaign            # resumes; runs to HC3
 amt reject my-campaign -m "use 30-day label window"   # feeds back, re-runs stage
 amt approve my-campaign            # resumes; autonomous until HC4
+   → booster families stop once more at HC_FEATURE with the proposed
+     FeatureRecipe + FitSpec; approve / reject the same way
 amt status my-campaign
 amt report my-campaign             # prints ScientificConclusion, MLflow links
 amt promote my-campaign            # HC4 decision: registers model alias
@@ -195,7 +212,8 @@ Checkpointer DB at `~/.amt/checkpoints.sqlite`; thread_id = campaign_id.
 4. Graph routing prevents QA before freeze and prevents trainer re-entry after freeze.
 5. `FrozenChampion` is a frozen Pydantic model (`model_config = ConfigDict(frozen=True)`); QA takes exactly one.
 6. Harness version pinned in contract; jobs assert.
-7. Optional (documented in README): second SP for QA jobs with grants only on `split_qa`.
+7. `feature_fit_hash` approved at HC_FEATURE; `execute_training` asserts equality, and the booster runtime accepts only the closed transform vocabulary (no SQL, no agent-authored Python) and never a `qa` source.
+8. Optional (documented in README): second SP for QA jobs with grants only on `split_qa`.
 
 ## 10. Implementation phases (Opus)
 

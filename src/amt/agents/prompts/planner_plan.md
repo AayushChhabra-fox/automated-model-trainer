@@ -8,3 +8,9 @@ success criteria; falsification criteria; maximum training iterations; compute b
 The primary metric must be the EvaluationContract's primary metric. Permitted changes must
 be the ones the hypothesis actually requires — anything broader invites blind search.
 Set `max_iterations` to the smallest number that can honestly test the hypothesis.
+
+Set `family` when the hypothesis names the model class to test: `popularity`, `sasrec`,
+`xgboost_classifier`, `xgboost_reranker`, `lightgbm_classifier` or `lightgbm_reranker`.
+Leave `feature_recipe`, `fit_spec` and `feature_fit_hash` empty — the booster families get
+their input shape from a separate proposal that a human approves, and the graph stamps the
+approved one back onto this plan.

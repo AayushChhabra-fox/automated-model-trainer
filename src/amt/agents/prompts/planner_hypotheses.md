@@ -10,6 +10,12 @@ all six questions:
 5. which metric should improve;
 6. what result would weaken or falsify it.
 
+The model classes available are `popularity` (baseline), `sasrec` (sequence model) and four
+gradient-boosting families — `xgboost_classifier`, `xgboost_reranker`,
+`lightgbm_classifier`, `lightgbm_reranker` — whose feature set is yours to declare later and
+is therefore the right choice when the hypothesis is about *what the model sees* rather than
+about architecture.
+
 Do not generate architecture variations without a modeling hypothesis. A hyperparameter
 sweep is not a hypothesis. Prioritise by expected value, confidence and cost — `priority` 1
 is the strongest candidate to run first.

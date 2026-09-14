@@ -169,6 +169,33 @@ Approval stamps `contract_hash`. From here to HC4 the campaign is autonomous.
 If you reject at HC3 the splits are re-materialized. If you later realize the contract is wrong
 (after training has started), do not edit anything — start a new campaign. That is by design.
 
+### 2.3b HC_FEATURE — approve the feature recipe (booster families only)
+
+If the Planner picks one of the gradient-boosting families (`xgboost_classifier`,
+`xgboost_reranker`, `lightgbm_classifier`, `lightgbm_reranker`) the campaign stops once more
+before any job is submitted. Those families have no fixed input shape, so you approve the
+`FeatureRecipe` (sources, joins, feature columns, label, candidate generation, filters) and the
+`FitSpec` that the Trainer will work inside:
+
+```bash
+uv run amt status <campaign>     # awaiting HC_FEATURE
+uv run amt approve <campaign>
+uv run amt reject  <campaign> -m "feature X reads the labelled event; drop it"
+```
+
+Read it for leakage first: every feature must be computable at serving time from the user's
+history plus the candidate item. Then check the label strategy and the candidate set — those
+decide what the model is actually learning to rank.
+
+Approval stamps `feature_fit_hash`, which is the hash of the recipe plus the structural part of
+the `FitSpec` (`booster_params` excluded). Consequences:
+
+- later iterations that only retune hyperparameters run without asking you again;
+- any change to features, label, candidates or structural fit fields returns here for
+  re-approval and is visible as a new `feature_fit_hash`;
+- `execute_training` refuses a config whose `feature_fit_hash` is not the approved one;
+- `popularity` and `sasrec` skip this checkpoint entirely.
+
 ### 2.4 Autonomous phase — what to watch
 
 The CLI blocks while jobs run. In a second terminal:
@@ -247,6 +274,8 @@ These are enforced in code (routing, `SplitGuard`, hash assertions). If you hit 
 a new campaign, not a workaround.
 
 - Run a training or baseline job with `qa` in its allowed splits.
+- Train a booster family on a feature/fit shape you did not approve, or on one that changed
+  after you approved it.
 - Run QA before exactly one `FrozenChampion` exists.
 - Re-enter the trainer after freeze.
 - Continue after `contract_hash` changes.
@@ -262,11 +291,31 @@ a new campaign, not a workaround.
 - Per-agent models can be downgraded — or pointed at a cheaper provider — via `AMT_*_MODEL`
   for rehearsal campaigns.
 
-## 7. Adding a model family
+## 7. Model families
+
+| Family | Kind | Input shape |
+|---|---|---|
+| `popularity` | baseline, trailing frequency | fixed in code |
+| `sasrec` | sequence model | fixed in code |
+| `xgboost_classifier` | pointwise `binary:logistic` | declared per hypothesis by an approved `FeatureRecipe` |
+| `xgboost_reranker` | pairwise `rank:pairwise` | same, grouped by `group_key` |
+| `lightgbm_classifier` | pointwise `binary` | same |
+| `lightgbm_reranker` | `lambdarank` | same, grouped by `group_key` |
+
+The four booster families share one runtime (`src/amt/jobs/models/tabular_common.py`) that
+executes the recipe: it builds `(history, candidate)` rows from the frozen splits plus the
+item-attribute tables the recipe names, fits the booster, and at serving time generates
+candidates and scores them through the same feature builder. They need `xgboost` / `lightgbm`
+from the `jobs` extra (on macOS also `brew install libomp`); the unit tests skip when the
+native library cannot load.
+
+### Adding a model family
 
 1. Implement `fit / recommend / pyfunc wrapper` in `src/amt/jobs/models/<family>.py`
-   following `sasrec.py`.
-2. Register it in `src/amt/jobs/models/registry.py`.
+   following `sasrec.py` — or, for a recipe-driven family, a thin module over
+   `tabular_common.fit_family` following `lightgbm_reranker.py`.
+2. Register it in `src/amt/jobs/models/registry.py` (and in `RECIPE_FAMILIES` plus
+   `amt.schemas.feature_recipe.TABULAR_FAMILIES` if it takes a recipe).
 3. Add it to the Planner's permitted changes in the campaign's ExperimentPlan (the agent reads
    the registry to know what exists).
 4. Unit-test it under `tests/unit/test_models.py`; no Spark or Databricks needed.
@@ -276,8 +325,8 @@ a new campaign, not a workaround.
 
 ```bash
 amt start "<problem>" -c <id> [--max-iterations N] [--max-hypotheses N] [--max-compute-minutes M] [--mock]
-amt approve <id>                 # HC2 / HC3
-amt reject  <id> -m "<feedback>" # HC2 / HC3, re-runs the stage
+amt approve <id>                 # HC2 / HC3 / HC_FEATURE
+amt reject  <id> -m "<feedback>" # HC2 / HC3 / HC_FEATURE, re-runs the stage
 amt status  <id>                 # compact state + which checkpoint is pending
 amt resume  <id>                 # continue after crash / kill
 amt report  <id>                 # Scientific Conclusion + MLflow refs (HC4)

@@ -104,12 +104,14 @@ def campaign(settings: Settings):
         converge_after: int = 3,
         n_hypotheses: int = 1,
         executor: Any | None = None,
+        family: str = "sasrec",
     ):
         mock_executor, llm_factory, canned = mock_stack(
             qa_outcome=qa_outcome,  # type: ignore[arg-type]
             phase0_invalid_first_attempt=phase0_invalid_first_attempt,
             converge_after=converge_after,
             n_hypotheses=n_hypotheses,
+            family=family,
         )
         executor = executor or mock_executor
         graph = build_graph(

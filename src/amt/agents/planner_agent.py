@@ -6,6 +6,7 @@ from amt.agents.base import AgentBase
 from amt.schemas.champion import FinalChampionSelection, HypothesisChampion
 from amt.schemas.conclusion import ScientificConclusion
 from amt.schemas.evaluation_contract import EvaluationContract
+from amt.schemas.feature_recipe import FeatureFitProposal
 from amt.schemas.hypothesis import ExperimentPlan, Hypothesis, HypothesisBacklog
 from amt.schemas.problem_spec import ProblemSpec
 from amt.schemas.qa import Phase0Result, Phase1Result, QAAssessment
@@ -60,6 +61,35 @@ class PlannerAgent(AgentBase):
                 "baseline_reference": plan.baseline_reference or baseline_reference,
             }
         )
+
+    def propose_feature_fit(
+        self,
+        hypothesis: Hypothesis,
+        plan: ExperimentPlan,
+        spec: ProblemSpec,
+        contract: EvaluationContract,
+        family: str = "",
+        previous: FeatureFitProposal | None = None,
+        human_feedback: str | None = None,
+    ) -> FeatureFitProposal:
+        """Declare what goes into a tabular model. Presented for human approval."""
+        agent = self.agent("planner.feature_fit", "planner_feature_fit", FeatureFitProposal)
+        proposal = agent.invoke(
+            {
+                "hypothesis": hypothesis,
+                "experiment_plan": plan,
+                "problem_spec": spec,
+                "data_sources": [d.model_dump() for d in spec.data_sources],
+                "train_split": contract.train_split,
+                "validation_split": contract.validation_split,
+                "label_definition": contract.label_definition,
+                "candidate_generation_rules": contract.candidate_generation_rules,
+                "target_family": family,
+                "previous_proposal": previous,
+                "human_feedback": human_feedback,
+            }
+        )
+        return proposal.model_copy(update={"family": proposal.family or family})
 
     def select_final_champion(
         self,

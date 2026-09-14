@@ -24,6 +24,16 @@ from amt.schemas.common import CohortDef, MetricDef
 from amt.schemas.conclusion import ProductInterpretation, ScientificConclusion
 from amt.schemas.evaluation_contract import AcceptanceCriteria, DatasetDefinition, TemporalRange
 from amt.schemas.experiment_config import ExperimentConfig
+from amt.schemas.feature_recipe import (
+    CandidateGeneration,
+    FeatureFitProposal,
+    FeatureRecipe,
+    FeatureTransform,
+    FitSpec,
+    LabelSpec,
+    RecipeJoin,
+    RecipeSource,
+)
 from amt.schemas.hypothesis import ExperimentPlan, Hypothesis, HypothesisBacklog
 from amt.schemas.problem_spec import (
     BaselineDefinition,
@@ -86,11 +96,15 @@ class CannedResponder:
         converge_after: int = 3,
         n_hypotheses: int = 1,
         probe_steps: int = 2,
+        family: str = "sasrec",
     ) -> None:
         self.qa_outcome: QaOutcome = qa_outcome
         self.converge_after = converge_after
         self.n_hypotheses = n_hypotheses
         self.probe_steps = probe_steps
+        # Which family the canned planner/trainer aim at; a tabular one exercises
+        # the feature/fit checkpoint.
+        self.family = family
         self.calls: list[str] = []
         self.counts: dict[str, int] = {}
 
@@ -106,6 +120,7 @@ class CannedResponder:
             EvaluationContractDraft: self._contract,
             HypothesisBacklog: self._backlog,
             ExperimentPlan: self._plan,
+            FeatureFitProposal: self._feature_fit,
             ExperimentConfig: self._config,
             TrainerInterpretation: self._interpretation,
             ChampionSelection: self._champion,
@@ -311,11 +326,69 @@ class CannedResponder:
             falsification_criteria="No improvement after 3 informed iterations.",
             max_iterations=3,
             compute_budget_minutes=60.0,
+            family=self.family,
+        )
+
+    def _feature_fit(self, text: str) -> FeatureFitProposal:
+        revision = self._bump("feature_fit")
+        return FeatureFitProposal(
+            family=self.family,
+            feature_recipe=FeatureRecipe(
+                sources=[
+                    RecipeSource(name="interactions", role="interactions", split="train"),
+                    RecipeSource(
+                        name="item_attrs",
+                        role="item_attributes",
+                        split="train",
+                        columns=["event_type"],
+                        join_keys=["item_id"],
+                    ),
+                ],
+                joins=[RecipeJoin(source="item_attrs", keys=["item_id"])],
+                feature_columns=[
+                    FeatureTransform(name="item_popularity", kind="count", of="item_id", over="train"),
+                    FeatureTransform(name="history_length", kind="column", source="history_length"),
+                    FeatureTransform(
+                        name="type_affinity", kind="count", of="event_type", over="history"
+                    ),
+                ]
+                + (
+                    [FeatureTransform(name="item_rank", kind="column", source="item_train_rank")]
+                    if revision > 1
+                    else []
+                ),
+                label=LabelSpec(strategy="holdout_next_item", definition="last train start"),
+                group_key="user_id",
+                candidate_generation=CandidateGeneration(strategy="popularity_topn", n=200),
+                leakage_notes="Every feature is computable from history plus the candidate.",
+            ),
+            fit_spec=FitSpec(
+                num_boost_round=200,
+                early_stopping_rounds=20,
+                negative_samples_per_positive=4,
+                booster_params={"learning_rate": 0.1, "max_depth": 6},
+            ),
+            rationale="Catalog frequency plus per-user type affinity tests the hypothesis.",
+            leakage_argument="No feature reads the labelled event or anything after it.",
         )
 
     # --- Stage 4/6/7 ----------------------------------------------------------------
     def _config(self, text: str) -> ExperimentConfig:
         i = self._bump("config")
+        if self.family != "sasrec":
+            return ExperimentConfig(
+                family=self.family,
+                model={"max_depth": 4 + i},
+                training={"learning_rate": 0.1 / i},
+                fit_spec=FitSpec(
+                    num_boost_round=200,
+                    early_stopping_rounds=20,
+                    negative_samples_per_positive=4,
+                    booster_params={"learning_rate": 0.1 / i, "max_depth": 4 + i},
+                ),
+                rationale="Retune depth and learning rate inside the approved shape.",
+                changes_from_previous=[] if i == 1 else ["deeper trees", "lower learning rate"],
+            )
         return ExperimentConfig(
             family="sasrec",
             model={
@@ -481,10 +554,14 @@ def mock_stack(
     phase0_invalid_first_attempt: bool = False,
     converge_after: int = 3,
     n_hypotheses: int = 1,
+    family: str = "sasrec",
 ) -> tuple[LocalMockExecutor, Callable[[str], FakeLLM], CannedResponder]:
     """``(executor, llm_factory, responder)`` configured consistently for a dry run."""
     responder = CannedResponder(
-        qa_outcome=qa_outcome, converge_after=converge_after, n_hypotheses=n_hypotheses
+        qa_outcome=qa_outcome,
+        converge_after=converge_after,
+        n_hypotheses=n_hypotheses,
+        family=family,
     )
     executor = LocalMockExecutor(
         qa_outcome=qa_outcome,

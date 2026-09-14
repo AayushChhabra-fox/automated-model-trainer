@@ -111,7 +111,7 @@ def _report_position(graph: Any, campaign: str) -> None:
 
 
 def _render_checkpoint(payload: dict) -> str:
-    for key in ("problem_spec", "evaluation_contract", "conclusion"):
+    for key in ("problem_spec", "evaluation_contract", "feature_fit", "conclusion"):
         if payload.get(key):
             return json.dumps(payload[key], indent=2, default=str)[:8000]
     return json.dumps(payload, indent=2, default=str)[:4000]

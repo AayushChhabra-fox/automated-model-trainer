@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import Field
 
 from amt.schemas.common import AmtModel, new_id
+from amt.schemas.feature_recipe import FeatureRecipe, FitSpec
 
 HypothesisStatus = Literal["pending", "active", "converged", "abandoned", "falsified"]
 
@@ -59,6 +60,14 @@ class ExperimentPlan(AmtModel):
     permitted_model_changes: list[str] = Field(default_factory=list)
     permitted_feature_changes: list[str] = Field(default_factory=list)
     search_space: dict = Field(default_factory=dict)
+    family: str = Field(
+        default="",
+        description="Model family this plan targets. Tabular families need a FeatureRecipe.",
+    )
+    # Filled at the feature/fit human checkpoint, not by the Planner's plan call.
+    feature_recipe: FeatureRecipe | None = None
+    fit_spec: FitSpec | None = None
+    feature_fit_hash: str = ""
     success_criteria: str = ""
     falsification_criteria: str = ""
     max_iterations: int = Field(default=5, ge=1)

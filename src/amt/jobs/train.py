@@ -102,6 +102,71 @@ def _flatten(prefix: str, payload: Any, out: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _recipe_attribute_frames(
+    contract: Mapping[str, Any],
+    config: Mapping[str, Any],
+    item_col: str,
+    spark: Any | None,
+) -> dict[str, Any]:
+    """Read the item-attribute tables a ``feature_recipe`` names, at item grain.
+
+    The frozen splits still come from ``SplitGuard``; this only fetches the
+    descriptive columns the approved recipe asked for. A recipe that points at
+    the QA split's table -- by name rather than by split -- is refused here.
+    """
+    from amt.jobs.data.loaders import split_ref
+    from amt.jobs.entry import to_pandas
+
+    recipe = config.get("feature_recipe")
+    if not isinstance(recipe, Mapping):
+        return {}
+
+    qa_tables = set()
+    try:
+        qa_tables.add(str(split_ref(contract, "qa").get("table") or "").lower())
+    except Exception:  # pragma: no cover - contract without a qa ref
+        pass
+
+    frames: dict[str, Any] = {}
+    for source in recipe.get("sources") or []:
+        table = str(source.get("table") or "")
+        if not table:
+            continue
+        if table.lower() in qa_tables:
+            raise ContractMismatch(
+                f"feature recipe source {source.get('name')!r} reads the QA split table "
+                f"{table!r}; training may never see QA"
+            )
+        if spark is None:
+            raise ContractMismatch(
+                f"feature recipe source {source.get('name')!r} needs table {table!r} "
+                "but this job has no Spark session"
+            )
+        keys = [str(k) for k in (source.get("join_keys") or [])] or [item_col]
+        columns = [str(c) for c in (source.get("columns") or [])]
+        wanted = ", ".join(dict.fromkeys([*keys, *columns]))
+        frames[str(source.get("name") or table)] = to_pandas(
+            spark.sql(f"SELECT DISTINCT {wanted} FROM {table}")
+        )
+    return frames
+
+
+def _recipe_params(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Compact params identifying an approved feature/fit shape on the MLflow run."""
+    recipe = config.get("feature_recipe")
+    if not isinstance(recipe, Mapping):
+        return {}
+    label = recipe.get("label") or {}
+    candidates = recipe.get("candidate_generation") or {}
+    return {
+        "feature_fit_hash": str(config.get("feature_fit_hash") or ""),
+        "recipe.n_features": len(recipe.get("feature_columns") or []),
+        "recipe.label_strategy": str(label.get("strategy") or ""),
+        "recipe.candidates": str(candidates.get("strategy") or ""),
+        "recipe.group_key": str(recipe.get("group_key") or ""),
+    }
+
+
 def _evaluate_frame(model, frame, ks: Sequence[int], catalog_size: int, k_max: int):
     ranked = model.recommend(frame.histories, k_max)
     result = evaluate(
@@ -140,13 +205,15 @@ def train_and_evaluate(
 
     model_cfg = dict(config.get("model") or {})
     family = str(model_cfg.get("family") or config.get("family") or "popularity")
+    item_col = str(config.get("item_col", "item_id"))
 
     index = build_item_index(
         train_df,
-        item_col=str(config.get("item_col", "item_id")),
+        item_col=item_col,
         min_count=int(config.get("min_item_count", 1)),
     )
     val_frame = build_eval_frame(val_df)
+    extra_frames = _recipe_attribute_frames(contract, config, item_col, spark)
 
     def _log_curve(step: int, metrics: Mapping[str, float]) -> None:
         if mlflow is None:
@@ -169,6 +236,7 @@ def train_and_evaluate(
         index=index,
         logger=_log_curve,
         evaluator=_evaluator if family != "popularity" else None,
+        extra_frames=extra_frames,
     )
 
     val_metrics, val_per_user, _ranked = _evaluate_frame(
@@ -208,12 +276,17 @@ def train_and_evaluate(
                 "harness_version": HARNESS_VERSION,
             },
         )
-        mlflow.log_params(_flatten("", config, {}))
+        # The recipe is logged whole as the config artifact; flattening it into
+        # params would bury the run under one param per transform.
+        mlflow.log_params(
+            _flatten("", {k: v for k, v in config.items() if k != "feature_recipe"}, {})
+        )
         mlflow.log_params(
             {
                 "model.family": family,
                 "catalog_size": index.catalog_size,
                 "harness_version": HARNESS_VERSION,
+                **_recipe_params(config),
             }
         )
         mlflow.log_metrics({f"train/{k}": float(v) for k, v in train_metrics.items()})

@@ -26,6 +26,8 @@ from amt.graph.nodes.evaluation_contract import (
     make_run_baseline_node,
 )
 from amt.graph.nodes.planner import (
+    make_hc_feature_fit_node,
+    make_planner_feature_fit_node,
     make_planner_final_champion_node,
     make_planner_select_hypothesis_node,
 )
@@ -38,10 +40,12 @@ from amt.graph.nodes.trainer import (
 )
 from amt.graph.routing import (
     route_after_hc_contract,
+    route_after_hc_feature_fit,
     route_after_hc_problem_spec,
     route_after_planner_select,
     route_after_qa_phase0,
     route_after_trainer_interpret,
+    route_after_trainer_propose,
 )
 from amt.graph.state import CampaignState
 from amt.settings import Settings, get_settings
@@ -90,6 +94,8 @@ def build_graph(
     graph.add_node("hc_contract", make_hc_contract_node(deps))
     graph.add_node("run_baseline", make_run_baseline_node(deps))
     graph.add_node("planner_select_hypothesis", make_planner_select_hypothesis_node(deps))
+    graph.add_node("planner_feature_fit", make_planner_feature_fit_node(deps))
+    graph.add_node("hc_feature_fit", make_hc_feature_fit_node(deps))
     graph.add_node("trainer_propose", make_trainer_propose_node(deps))
     graph.add_node("execute_training", make_execute_training_node(deps))
     graph.add_node("trainer_interpret", make_trainer_interpret_node(deps))
@@ -123,10 +129,27 @@ def build_graph(
         route_after_planner_select,
         {
             "trainer_propose": "trainer_propose",
+            "planner_feature_fit": "planner_feature_fit",
             "planner_final_champion": "planner_final_champion",
         },
     )
-    graph.add_edge("trainer_propose", "execute_training")
+    graph.add_edge("planner_feature_fit", "hc_feature_fit")
+    graph.add_conditional_edges(
+        "hc_feature_fit",
+        route_after_hc_feature_fit,
+        {
+            "planner_feature_fit": "planner_feature_fit",
+            "trainer_propose": "trainer_propose",
+        },
+    )
+    graph.add_conditional_edges(
+        "trainer_propose",
+        route_after_trainer_propose,
+        {
+            "execute_training": "execute_training",
+            "planner_feature_fit": "planner_feature_fit",
+        },
+    )
     graph.add_edge("execute_training", "trainer_interpret")
     graph.add_conditional_edges(
         "trainer_interpret",

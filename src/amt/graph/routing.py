@@ -3,6 +3,7 @@
 These rules are code, not prompts. An agent cannot talk its way past them:
 
 * the trainer loop cannot exceed ``plan.max_iterations`` (or the campaign budget);
+* a tabular booster never trains on a feature/fit shape a human has not approved;
 * every stage after HC3 asserts the frozen ``contract_hash``;
 * QA cannot run before champion freeze, and never with more than one champion;
 * Phase 0 may be retried at most :data:`PHASE0_MAX_ATTEMPTS` times;
@@ -15,6 +16,7 @@ from amt.graph.state import CampaignState
 from amt.schemas.champion import FrozenChampion
 from amt.schemas.common import ExperimentBudget
 from amt.schemas.evaluation_contract import EvaluationContract
+from amt.schemas.feature_recipe import is_tabular_family
 from amt.schemas.qa import QADecision
 
 PHASE0_MAX_ATTEMPTS = 3
@@ -46,6 +48,53 @@ def assert_not_frozen(state: CampaignState) -> None:
     """Trainer work is forbidden once a champion is frozen."""
     if state.get("frozen_champion") is not None:
         raise ContractViolation("Training cannot resume after champion freeze.")
+
+
+def target_family(state: CampaignState) -> str:
+    """The family about to run: what the Trainer asked for, else what the plan declares."""
+    config = state.get("current_config")
+    if config is not None and config.family:
+        return str(config.family)
+    plan = state.get("experiment_plan")
+    return str(getattr(plan, "family", "") or "")
+
+
+def feature_fit_needed(state: CampaignState) -> bool:
+    """True when a tabular family has no approved feature/fit shape to run under."""
+    if not is_tabular_family(target_family(state)):
+        return False
+    if not state.get("feature_fit_approved") or not state.get("feature_fit_hash"):
+        return True
+    config = state.get("current_config")
+    if config is None:
+        return False
+    # The Trainer may retune hyperparameters, never the approved shape.
+    return bool(
+        config.feature_fit_hash and config.feature_fit_hash != state.get("feature_fit_hash")
+    )
+
+
+def assert_feature_fit_approved(state: CampaignState) -> None:
+    """A booster job may only be set up on the exact shape a human approved."""
+    config = state.get("current_config")
+    family = str(getattr(config, "family", "") or "") or target_family(state)
+    if not is_tabular_family(family):
+        return
+    if not state.get("feature_fit_approved"):
+        raise ContractViolation(
+            f"family {family!r} requires an approved FeatureRecipe/FitSpec; "
+            "the feature/fit checkpoint has not been passed."
+        )
+    approved = str(state.get("feature_fit_hash") or "")
+    if config is None or not approved:
+        raise ContractViolation("No approved feature/fit shape to train under.")
+    if config.feature_fit_hash != approved:
+        raise ContractViolation(
+            "ExperimentConfig runs a different feature/fit shape than the approved one: "
+            f"{config.feature_fit_hash[:12]} != {approved[:12]}."
+        )
+    if config.feature_recipe is None:
+        raise ContractViolation("Tabular config carries no FeatureRecipe.")
 
 
 def assert_ready_for_qa(state: CampaignState) -> None:
@@ -84,9 +133,21 @@ def route_after_hc_contract(state: CampaignState) -> str:
 
 def route_after_planner_select(state: CampaignState) -> str:
     """No hypothesis left (or budget spent) → pick the final champion."""
-    if state.get("current_hypothesis_id"):
-        return "trainer_propose"
-    return "planner_final_champion"
+    if not state.get("current_hypothesis_id"):
+        return "planner_final_champion"
+    if feature_fit_needed(state):
+        return "planner_feature_fit"
+    return "trainer_propose"
+
+
+def route_after_hc_feature_fit(state: CampaignState) -> str:
+    """HC_FEATURE: rejected → redraft the shape; approved → let the Trainer tune it."""
+    return "trainer_propose" if state.get("feature_fit_approved") else "planner_feature_fit"
+
+
+def route_after_trainer_propose(state: CampaignState) -> str:
+    """A config that changes the approved shape goes back for re-approval, not to compute."""
+    return "planner_feature_fit" if feature_fit_needed(state) else "execute_training"
 
 
 def _plan_max_iterations(state: CampaignState) -> int:

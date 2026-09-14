@@ -16,6 +16,7 @@ Autonomous ML experimentation system on Databricks: LangGraph orchestrator (loca
 - Never duplicate MLflow detail into `CampaignState`; store IDs/references.
 - Secrets only via env (`DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`, `AMT_LLM_API_KEY`).
 - Agents are provider-agnostic: models are named `provider:model_id` and built in `src/amt/llm.py`. Never import a provider SDK outside that module.
+- The booster families (`xgboost_*`, `lightgbm_*`) take their inputs from a `FeatureRecipe` + `FitSpec` approved at `HC_FEATURE`. Only the closed transform vocabulary is executable, and `execute_training` refuses a config whose `feature_fit_hash` is not the approved one.
 
 ## Commands
 ```

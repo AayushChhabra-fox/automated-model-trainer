@@ -20,6 +20,7 @@ from typing import Any
 __all__ = [
     "FAMILIES",
     "PYFUNC_INPUT_COLUMNS",
+    "RECIPE_FAMILIES",
     "RecommenderPyfunc",
     "UnknownFamily",
     "fit_model",
@@ -35,7 +36,24 @@ __all__ = [
 FAMILIES: dict[str, str] = {
     "popularity": "amt.jobs.models.popularity",
     "sasrec": "amt.jobs.models.sasrec",
+    "xgboost_classifier": "amt.jobs.models.xgboost_classifier",
+    "xgboost_reranker": "amt.jobs.models.xgboost_reranker",
+    "lightgbm_classifier": "amt.jobs.models.lightgbm_classifier",
+    "lightgbm_reranker": "amt.jobs.models.lightgbm_reranker",
 }
+
+# Families whose input shape is declared by an approved FeatureRecipe rather than
+# fixed in code. Mirrors ``amt.schemas.feature_recipe.TABULAR_FAMILIES``, which the
+# orchestrator uses; the two are kept in step by a unit test (jobs code must not
+# import the orchestrator's schemas).
+RECIPE_FAMILIES: frozenset[str] = frozenset(
+    {
+        "xgboost_classifier",
+        "xgboost_reranker",
+        "lightgbm_classifier",
+        "lightgbm_reranker",
+    }
+)
 
 PYFUNC_INPUT_COLUMNS = ("history", "k")
 

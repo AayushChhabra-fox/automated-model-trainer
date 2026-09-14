@@ -63,3 +63,90 @@ def test_config_flattening_for_mlflow(experiment_config):
     assert params["family"] == experiment_config.family
     assert any(key.startswith("training.") for key in params)
     assert experiment_config.to_yaml_dict()["model"]["family"] == experiment_config.family
+
+
+def _recipe(**overrides):
+    from amt.schemas.feature_recipe import (
+        CandidateGeneration,
+        FeatureRecipe,
+        FeatureTransform,
+        LabelSpec,
+        RecipeSource,
+    )
+
+    fields = {
+        "sources": [RecipeSource(name="interactions", role="interactions", split="train")],
+        "feature_columns": [
+            FeatureTransform(name="pop", kind="count", of="item_id", over="train"),
+            FeatureTransform(name="hist_len", kind="column", source="history_length"),
+        ],
+        "label": LabelSpec(strategy="holdout_next_item"),
+        "candidate_generation": CandidateGeneration(strategy="popularity_topn", n=200),
+    }
+    fields.update(overrides)
+    return FeatureRecipe(**fields)
+
+
+def test_feature_fit_hash_ignores_booster_params():
+    from amt.schemas.feature_recipe import FitSpec, feature_fit_hash
+
+    recipe = _recipe()
+    base = FitSpec(num_boost_round=200, booster_params={"learning_rate": 0.1})
+    retuned = FitSpec(num_boost_round=200, booster_params={"learning_rate": 0.01, "max_depth": 9})
+    assert feature_fit_hash(recipe, base) == feature_fit_hash(recipe, retuned)
+
+
+def test_feature_fit_hash_tracks_structural_changes():
+    from amt.schemas.feature_recipe import FeatureTransform, FitSpec, feature_fit_hash
+
+    recipe = _recipe()
+    fit = FitSpec()
+    assert feature_fit_hash(recipe, fit) != feature_fit_hash(
+        recipe, fit.model_copy(update={"num_boost_round": 500})
+    )
+    wider = _recipe(
+        feature_columns=[
+            *recipe.feature_columns,
+            FeatureTransform(name="bias", kind="literal", value=1.0),
+        ]
+    )
+    assert feature_fit_hash(wider, fit) != feature_fit_hash(recipe, fit)
+    relabelled = recipe.model_copy(
+        update={"label": recipe.label.model_copy(update={"strategy": "interaction_positive"})}
+    )
+    assert feature_fit_hash(relabelled, fit) != feature_fit_hash(recipe, fit)
+
+
+def test_feature_fit_hash_ignores_ids_and_prose():
+    from amt.schemas.feature_recipe import FitSpec, feature_fit_hash
+
+    recipe = _recipe()
+    reworded = recipe.model_copy(
+        update={
+            "recipe_id": "recipe-other",
+            "notes": "rewritten explanation",
+            "leakage_notes": "same argument, new words",
+        }
+    )
+    assert feature_fit_hash(reworded, FitSpec()) == feature_fit_hash(recipe, FitSpec())
+
+
+def test_config_hash_tracks_the_feature_fit_shape(experiment_config):
+    from amt.schemas.feature_recipe import FitSpec, feature_fit_hash
+
+    recipe = _recipe()
+    tabular = experiment_config.model_copy(
+        update={
+            "family": "lightgbm_reranker",
+            "feature_recipe": recipe,
+            "fit_spec": FitSpec(booster_params={"learning_rate": 0.1}),
+            "feature_fit_hash": feature_fit_hash(recipe, FitSpec()),
+        }
+    )
+    assert tabular.config_hash != experiment_config.config_hash
+    # Hyperparameters are part of the run's identity even though approval ignores them.
+    retuned = tabular.model_copy(
+        update={"fit_spec": tabular.fit_spec.model_copy(update={"booster_params": {"eta": 0.3}})}
+    )
+    assert retuned.config_hash != tabular.config_hash
+    assert retuned.feature_fit_hash == tabular.feature_fit_hash

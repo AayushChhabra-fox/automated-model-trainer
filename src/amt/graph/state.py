@@ -14,6 +14,7 @@ from amt.schemas.common import ExperimentBudget, new_id, utcnow
 from amt.schemas.conclusion import ScientificConclusion
 from amt.schemas.evaluation_contract import EvaluationContract, SplitMaterialization
 from amt.schemas.experiment_config import ExperimentConfig
+from amt.schemas.feature_recipe import FeatureFitProposal, FeatureRecipe, FitSpec
 from amt.schemas.hypothesis import ExperimentPlan, Hypothesis
 from amt.schemas.problem_spec import ProblemSpec
 from amt.schemas.qa import Phase0Result, Phase1Result, QAAssessment, QADecision
@@ -29,6 +30,7 @@ class Stage(str, Enum):
     EVALUATION_CONTRACT = "evaluation_contract"
     BASELINE = "baseline"
     PLANNING = "planning"
+    FEATURE_FIT = "feature_fit"
     TRAINING = "training"
     HYPOTHESIS_CHAMPION = "hypothesis_champion"
     FINAL_CHAMPION = "final_champion"
@@ -66,6 +68,13 @@ class CampaignState(TypedDict, total=False):
     current_hypothesis_id: str | None
     experiment_plan: ExperimentPlan | None
     current_config: ExperimentConfig | None
+    # Feature/fit shape for the tabular families: proposed by the Planner, approved by a
+    # human once per hypothesis, and re-approved whenever the structural hash changes.
+    feature_fit_proposal: FeatureFitProposal | None
+    approved_feature_recipe: FeatureRecipe | None
+    approved_fit_spec: FitSpec | None
+    feature_fit_hash: str
+    feature_fit_approved: bool
     # Results for the *current* hypothesis only; cleared when its champion is selected.
     run_results: dict[str, Any]
     last_result: Any | None
@@ -124,6 +133,11 @@ def new_campaign_state(
         current_hypothesis_id=None,
         experiment_plan=None,
         current_config=None,
+        feature_fit_proposal=None,
+        approved_feature_recipe=None,
+        approved_fit_spec=None,
+        feature_fit_hash="",
+        feature_fit_approved=False,
         run_results={},
         last_result=None,
         last_interpretation=None,
@@ -160,6 +174,9 @@ def describe(state: CampaignState) -> dict[str, Any]:
     """Compact, printable status view used by ``amt status``."""
     plan = state.get("experiment_plan")
     budget = state.get("budget") or ExperimentBudget()
+    feature_fit = (state.get("feature_fit_hash") or "")[:12] or "n/a"
+    if state.get("feature_fit_approved"):
+        feature_fit = f"{feature_fit} (approved)"
     return {
         "campaign_id": state.get("campaign_id"),
         "stage": state.get("stage"),
@@ -168,6 +185,7 @@ def describe(state: CampaignState) -> dict[str, Any]:
         "contract_hash": (state.get("contract_hash") or "")[:12],
         "hypotheses": len(state.get("hypotheses") or []),
         "current_hypothesis": state.get("current_hypothesis_id"),
+        "feature_fit": feature_fit,
         "iteration": state.get("iteration", 0),
         "max_iterations": plan.max_iterations if plan else budget.max_iterations,
         "experiments": len(state.get("experiment_history") or []),
