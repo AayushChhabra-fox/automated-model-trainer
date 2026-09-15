@@ -30,6 +30,19 @@ def test_harness_version_is_pinned():
     assert HARNESS_VERSION == "1.0.0"
 
 
+def test_the_contract_metric_vocabulary_matches_this_module():
+    """``amt.schemas`` must accept exactly the metrics ``evaluate`` produces.
+
+    The vocabulary is spelled out in the schemas so contracts stay free of the
+    job runtime; this is what keeps the copy honest.
+    """
+    from amt.schemas.common import HARNESS_METRIC_FAMILIES, is_harness_metric
+
+    produced = {name for name in evaluate([[1, 2]], [[1]], ks=(10,), catalog_size=5) if "@" in name}
+    assert all(is_harness_metric(name) for name in produced)
+    assert {name.split("@")[0] for name in produced} == set(HARNESS_METRIC_FAMILIES)
+
+
 def test_recall_counts_retrieved_fraction():
     ranked = [[1, 2, 3, 4], [9, 8, 7, 6]]
     truth = [{2, 4}, {1}]

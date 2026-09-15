@@ -33,9 +33,12 @@ class ProbeRequest(AmtModel):
 
 
 class SplitSpec(AmtModel):
-    """Split definition before materialization fills in version/row count/membership."""
+    """Split definition before materialization fills in the immutable reference."""
 
-    table: str
+    table: str = Field(
+        default="",
+        description="Leave empty: materialization names the output table.",
+    )
     description: str = ""
     temporal_range: tuple[str, str] | None = None
 
@@ -47,7 +50,7 @@ class EvaluationContractDraft(AmtModel):
     train: SplitSpec
     validation: SplitSpec
     qa: SplitSpec
-    split_strategy: str = "temporal"
+    split_policy: SplitPolicy
     user_population: str = ""
     item_population: str = ""
     label_definition: str = ""
@@ -98,7 +101,7 @@ def draft_to_contract(
         train_split=ref("train", draft.train),
         validation_split=ref("validation", draft.validation),
         qa_split=ref("qa", draft.qa),
-        split_policy=SplitPolicy(strategy=draft.split_strategy),
+        split_policy=draft.split_policy,
         user_population=draft.user_population,
         item_population=draft.item_population,
         label_definition=draft.label_definition,

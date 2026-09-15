@@ -72,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-json", default=None, help="path or JSON string")
     parser.add_argument("--frozen-json", default=None, help="path or JSON string")
     parser.add_argument("--baseline-run-id", default=None)
+    # Where `materialize` writes the split tables. A deployment fact, not part
+    # of the EvaluationContract, so the executor passes it per run.
+    parser.add_argument("--split-catalog", default=None)
+    parser.add_argument("--split-schema", default=None)
     parser.add_argument("--mlflow-experiment-id", default=None)
     parser.add_argument("--campaign-id", default=None)
     parser.add_argument("--hypothesis-id", default=None)

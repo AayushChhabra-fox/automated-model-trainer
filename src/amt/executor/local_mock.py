@@ -92,6 +92,8 @@ class LocalMockExecutor:
         def ref(base: SplitRef, rows: int) -> SplitRef:
             return base.model_copy(
                 update={
+                    # The real job names the output table; the draft leaves it empty.
+                    "table": base.table or f"main.amt.split_{base.name}",
                     "delta_version": 1,
                     "row_count": base.row_count or rows,
                     "membership_hash": hashlib.sha256(

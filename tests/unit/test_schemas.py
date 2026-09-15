@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from amt.schemas.common import ExperimentBudget, MetricDef, SplitRef
-from amt.schemas.evaluation_contract import EvaluationContract
+from amt.schemas.evaluation_contract import EvaluationContract, SplitPolicy
 from amt.schemas.hypothesis import Hypothesis
 from amt.schemas.qa import PairedDelta, Phase0Result, QADecision
 from amt.schemas.run_result import TrainingRunResult
@@ -33,7 +33,8 @@ def test_contract_carries_immutable_split_references(evaluation_contract):
     for name in ("train", "validation", "qa"):
         split = evaluation_contract.split(name)
         assert isinstance(split, SplitRef)
-        assert split.table
+        # The table, version and membership hash are placeholders until
+        # materialization returns the real references.
         assert split.delta_version >= 0
         assert split.row_count >= 0
         assert split.membership_hash is not None
@@ -55,6 +56,50 @@ def test_contract_rejects_acceptance_criteria_on_a_different_metric(evaluation_c
     payload["acceptance_criteria"]["primary_metric"] = "recall@10"
     with pytest.raises(ValidationError):
         EvaluationContract.model_validate(payload)
+
+
+def test_contract_rejects_metrics_the_harness_cannot_compute(evaluation_contract):
+    # A campaign whose primary metric nothing computes cannot select a champion,
+    # and the failure would only surface after the first training job.
+    payload = evaluation_contract.model_dump()
+    payload["primary_metric"] = "IPS-NDCG@10"
+    payload["acceptance_criteria"]["primary_metric"] = "IPS-NDCG@10"
+    payload["metrics"].append({"name": "IPS-NDCG@10", "definition": "Position-corrected NDCG."})
+    with pytest.raises(ValidationError, match="cannot compute"):
+        EvaluationContract.model_validate(payload)
+
+
+def test_temporal_split_policy_without_boundaries_is_rejected():
+    # Boundaries are what materialization executes; prose about "the last 35
+    # days" leaves the job with nothing to cut on.
+    with pytest.raises(ValidationError, match="train_end"):
+        SplitPolicy(strategy="temporal")
+    assert SplitPolicy(strategy="leave_last_n", n_validation=2, n_qa=1).n_validation == 2
+
+
+def test_split_boundaries_must_be_instants_not_sql():
+    # The job quotes the boundary into SQL, so `TIMESTAMP '...'` would be
+    # nested inside its own quotes and compare as a string.
+    with pytest.raises(ValidationError, match="not a timestamp"):
+        SplitPolicy(
+            strategy="temporal",
+            train_end="TIMESTAMP '2026-09-07 00:00:00 UTC'",
+            validation_end="2026-09-10",
+        )
+    # Every form Spark casts to an instant is allowed, including a named zone.
+    for train_end in (
+        "2026-09-07",
+        "2026-09-07 00:00:00",
+        "2026-09-07 00:00:00 UTC",
+        "2026-09-07T00:00:00+00:00",
+        "1757203200",
+    ):
+        assert (
+            SplitPolicy(
+                strategy="temporal", train_end=train_end, validation_end="2026-09-10"
+            ).train_end
+            == train_end
+        )
 
 
 def test_qa_split_use_before_freeze_is_structurally_disallowed(evaluation_contract):

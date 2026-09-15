@@ -17,11 +17,16 @@ Split shapes
 ``history`` is everything the model is allowed to condition on at that
 boundary; ``targets`` is what it must predict.  Building them here (rather
 than in each job) is what makes candidate and baseline comparable.
+
+Each name is prefixed with the campaign (``<campaign>_split_train``): campaigns
+share a schema, so without it two running at once would overwrite the frozen
+population the other is being judged against.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -33,6 +38,7 @@ __all__ = [
     "membership_hash",
     "plan_from_contract",
     "run",
+    "table_prefix_for",
 ]
 
 SPLIT_TABLE_NAMES = {
@@ -40,6 +46,20 @@ SPLIT_TABLE_NAMES = {
     "validation": "split_validation",
     "qa": "split_qa",
 }
+
+
+def table_prefix_for(campaign_id: str) -> str:
+    """A campaign id as the leading part of a table name.
+
+    Campaigns share one schema and each writes the same three splits, so the
+    campaign has to be in the name or two campaigns running at once overwrite
+    each other's frozen population.  Identifiers cannot carry the hyphens a
+    campaign id usually has, nor start with a digit.
+    """
+    cleaned = re.sub(r"[^a-z0-9]+", "_", str(campaign_id).strip().lower()).strip("_")
+    if not cleaned:
+        return ""
+    return cleaned if cleaned[0].isalpha() else f"c_{cleaned}"
 
 
 def membership_hash(user_ids: Sequence[Any]) -> str:
@@ -84,14 +104,47 @@ class SplitPlan:
 
 
 def plan_from_contract(contract: Mapping[str, Any]) -> SplitPlan:
-    """Read the ``dataset`` block of an EvaluationContract into a plan."""
+    """Read the executable fields of an EvaluationContract into a plan.
+
+    Those are ``dataset`` (source table, column map, filters, eligibility) and
+    ``split_policy`` (strategy and its boundaries or per-user counts).  A
+    ``dataset.split`` block overrides both, which is how local dry runs point
+    the same code at a file without writing a whole contract.
+    """
     dataset = dict(contract.get("dataset") or contract.get("dataset_definition") or {})
-    split = dict(dataset.get("split") or dataset.get("splits") or {})
-    known = {f for f in SplitPlan.__dataclass_fields__}
+    policy = dict(contract.get("split_policy") or {})
+    override = dict(dataset.get("split") or dataset.get("splits") or {})
+    known = set(SplitPlan.__dataclass_fields__)
+
     kwargs = {k: v for k, v in dataset.items() if k in known}
-    kwargs.update({k: v for k, v in split.items() if k in known})
+    columns = dict(dataset.get("columns") or {})
+    for field_name, column in (
+        ("user_col", columns.get("user")),
+        ("item_col", columns.get("item")),
+        ("ts_col", columns.get("timestamp")),
+    ):
+        if column:
+            kwargs[field_name] = column
+    kwargs.update(
+        {
+            k: v
+            for k, v in (
+                ("strategy", policy.get("strategy")),
+                ("train_end", policy.get("train_end")),
+                ("val_end", policy.get("validation_end")),
+                ("qa_end", policy.get("qa_end")),
+                ("n_val", policy.get("n_validation")),
+                ("n_qa", policy.get("n_qa")),
+            )
+            if v
+        }
+    )
+    kwargs.update({k: v for k, v in override.items() if k in known})
+
     plan = SplitPlan(**kwargs)
     plan.filters = list(plan.filters or [])
+    if not plan.source_table and not plan.source_path:
+        raise ValueError("the contract names no dataset.source_table, so there is nothing to split")
     return plan
 
 
@@ -250,6 +303,16 @@ def _leave_last_n_local(df, plan: SplitPlan):
     )
 
 
+def _pandas_predicate(predicate: str) -> str:
+    """A contract filter in ``DataFrame.query`` syntax.
+
+    Contract filters are SQL, because Spark is what runs them on a cluster.
+    Rewriting SQL equality is enough for the dry-run path; a predicate that
+    needs more than that simply cannot be checked locally.
+    """
+    return re.sub(r"(?<![=<>!])=(?!=)", "==", predicate)
+
+
 def _materialize_local(
     contract: Mapping[str, Any], plan: SplitPlan, output_dir: str
 ) -> dict[str, Any]:
@@ -272,7 +335,7 @@ def _materialize_local(
 
     df = read_local_table(path)
     for predicate in plan.filters:
-        df = df.query(predicate)
+        df = df.query(_pandas_predicate(predicate))
     df = _eligible(df, plan)
 
     if plan.strategy == "leave_last_n":
@@ -349,6 +412,21 @@ def _user_grain_sql(plan: SplitPlan, hist_upper: str, lo: str, hi: str) -> str:
     )
 
 
+def _ensure_schema(spark: Any, plan: SplitPlan) -> None:
+    """Create the output schema only when it is actually missing.
+
+    Unity Catalog checks CREATE SCHEMA on the catalog even for
+    ``IF NOT EXISTS``, so an unconditional create fails for the common case of
+    a user who owns one schema but cannot create schemas in the catalog.
+    """
+    try:
+        existing = spark.sql(f"SHOW SCHEMAS IN {plan.catalog} LIKE '{plan.schema}'").collect()
+    except Exception:
+        existing = []
+    if not existing:
+        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {plan.catalog}.{plan.schema}")
+
+
 def _materialize_spark(
     contract: Mapping[str, Any], plan: SplitPlan, spark: Any
 ) -> dict[str, Any]:
@@ -369,7 +447,7 @@ def _materialize_spark(
             ),
         }
 
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {plan.catalog}.{plan.schema}")
+    _ensure_schema(spark, plan)
     refs: dict[str, Any] = {}
     for name, query in queries.items():
         table = plan.table(name)
@@ -471,9 +549,18 @@ def materialize(
     contract: Mapping[str, Any],
     spark: Any | None = None,
     output_dir: str | None = None,
+    catalog: str | None = None,
+    schema: str | None = None,
+    campaign_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the three frozen splits and return their immutable references."""
     plan = plan_from_contract(contract)
+    if catalog:
+        plan.catalog = str(catalog)
+    if schema:
+        plan.schema = str(schema)
+    if campaign_id:
+        plan.table_prefix = table_prefix_for(campaign_id)
     if spark is not None:
         return _materialize_spark(contract, plan, spark)
     if not output_dir:
@@ -490,4 +577,7 @@ def run(args: Any) -> dict[str, Any]:
         contract,
         spark=get_spark(),
         output_dir=getattr(args, "local_dir", None),
+        catalog=getattr(args, "split_catalog", None),
+        schema=getattr(args, "split_schema", None),
+        campaign_id=getattr(args, "campaign_id", None),
     )

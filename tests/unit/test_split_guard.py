@@ -22,7 +22,12 @@ from amt.jobs.data.loaders import (
     split_ref,
     write_local_table,
 )
-from amt.jobs.materialize_splits import materialize, membership_hash, plan_from_contract
+from amt.jobs.materialize_splits import (
+    materialize,
+    membership_hash,
+    plan_from_contract,
+    table_prefix_for,
+)
 
 
 def _interactions(n_users: int = 12, n_events: int = 10) -> pd.DataFrame:
@@ -37,6 +42,23 @@ def _interactions(n_users: int = 12, n_events: int = 10) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _interactions_between(start: str, end: str, n_users: int = 12) -> pd.DataFrame:
+    """Weekly interactions spanning the mock contract's temporal range."""
+    stamps = pd.date_range(start, end, freq="7D")
+    return pd.DataFrame(
+        [
+            {
+                "user_id": f"u{u}",
+                "item_id": f"i{(u + e) % 7}",
+                "ts": ts.isoformat(),
+                "event_type": "start",
+            }
+            for u in range(n_users)
+            for e, ts in enumerate(stamps)
+        ]
+    )
 
 
 def _write(tmp_path, frame, name="interactions"):
@@ -187,6 +209,92 @@ def test_local_fallback_finds_the_table_by_name(tmp_path):
 def test_membership_hash_is_order_independent_and_sensitive():
     assert membership_hash(["a", "b"]) == membership_hash(["b", "a"])
     assert membership_hash(["a", "b"]) != membership_hash(["a", "c"])
+
+
+def test_plan_comes_from_the_frozen_contract_alone(evaluation_contract):
+    """Materialization must be executable from the contract's own fields.
+
+    The job runs on a cluster with no AMT settings and no access to the prose a
+    human read at HC3, so anything it needs -- source table, column names,
+    boundaries, eligibility -- has to be a field the contract carries.
+    """
+    plan = plan_from_contract(evaluation_contract.model_dump(mode="json"))
+    assert plan.source_table == "main.amt.interactions"
+    assert plan.strategy == "temporal"
+    assert (plan.train_end, plan.val_end, plan.qa_end) == (
+        "2026-07-10",
+        "2026-07-24",
+        "2026-08-01",
+    )
+    assert plan.min_interactions_per_user == 3
+    assert plan.filters == ["event_type = 'start'"]
+
+
+def test_plan_maps_the_contract_column_names(evaluation_contract):
+    payload = evaluation_contract.model_dump(mode="json")
+    payload["dataset"]["columns"] = {
+        "user": "account_id",
+        "item": "entity_id",
+        "timestamp": "event_timestamp",
+    }
+    plan = plan_from_contract(payload)
+    assert (plan.user_col, plan.item_col, plan.ts_col) == (
+        "account_id",
+        "entity_id",
+        "event_timestamp",
+    )
+
+
+def test_plan_refuses_a_contract_with_nothing_to_split():
+    with pytest.raises(ValueError, match="source_table"):
+        plan_from_contract({"dataset": {}, "split_policy": {}})
+
+
+def test_a_frozen_contract_materializes_end_to_end(tmp_path, evaluation_contract):
+    frame = _interactions_between("2026-05-01", "2026-08-01")
+    _write(tmp_path, frame, name="interactions")
+
+    result = materialize(
+        evaluation_contract.model_dump(mode="json"),
+        output_dir=str(tmp_path),
+        catalog="product_api_dev",
+        schema="amt",
+    )
+
+    assert result["splits"]["train"]["table"] == "product_api_dev.amt.split_train"
+    assert all(ref["row_count"] > 0 for ref in result["splits"].values())
+
+
+def test_each_campaign_writes_its_own_tables(tmp_path, evaluation_contract):
+    """Campaigns share a schema, so the name is all that keeps them apart."""
+    _write(tmp_path, _interactions_between("2026-05-01", "2026-08-01"), name="interactions")
+
+    result = materialize(
+        evaluation_contract.model_dump(mode="json"),
+        output_dir=str(tmp_path),
+        catalog="product_api_dev",
+        schema="amt",
+        campaign_id="vod-nextitem-001",
+    )
+
+    assert [ref["table"] for ref in result["splits"].values()] == [
+        "product_api_dev.amt.vod_nextitem_001_split_train",
+        "product_api_dev.amt.vod_nextitem_001_split_validation",
+        "product_api_dev.amt.vod_nextitem_001_split_qa",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("campaign_id", "expected"),
+    [
+        ("vod-nextitem-001", "vod_nextitem_001"),
+        ("LFY Rerank v2", "lfy_rerank_v2"),
+        ("2026-lfy", "c_2026_lfy"),  # an identifier cannot start with a digit
+        ("--", ""),
+    ],
+)
+def test_a_campaign_id_becomes_a_legal_identifier(campaign_id, expected):
+    assert table_prefix_for(campaign_id) == expected
 
 
 def test_plan_reads_the_dataset_block(tmp_path):

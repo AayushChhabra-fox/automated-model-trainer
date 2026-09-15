@@ -6,7 +6,9 @@ The contract is the experimental ground truth. Once approved at HC3 it is frozen
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -15,12 +17,27 @@ from amt.schemas.common import (
     CohortDef,
     MetricDef,
     SplitRef,
+    is_harness_metric,
     new_id,
     stable_hash,
     utcnow,
 )
 
 HARNESS_VERSION = "1.0.0"
+
+SplitStrategy = Literal["temporal", "leave_last_n"]
+
+# A boundary is quoted into SQL as a literal and compared against the source's
+# timestamp column, so it has to *be* the instant: a date, a date and time with
+# an optional zone (Spark casts `2026-09-07 00:00:00 UTC` happily), or epoch
+# units when the column is numeric. `TIMESTAMP '2026-09-07'` would end up
+# quoted inside its own quotes and compared as text.
+_INSTANT = re.compile(
+    r"^\d{4}-\d{2}-\d{2}"
+    r"(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
+    r"(?:\s?(?:Z|[+-]\d{2}:?\d{2}|[A-Za-z][A-Za-z_+/-]*))?$"
+    r"|^\d+$"
+)
 
 
 class TemporalRange(AmtModel):
@@ -29,8 +46,45 @@ class TemporalRange(AmtModel):
     timezone: str = "UTC"
 
 
+class ColumnMap(AmtModel):
+    """Physical column names in ``DatasetDefinition.source_table``.
+
+    The harness works on a ``(user, item, timestamp)`` interaction grain; this
+    is how that grain is found in the source, so the names must be columns that
+    exist rather than a description of them.
+    """
+
+    user: str = "user_id"
+    item: str = "item_id"
+    timestamp: str = "ts"
+
+
 class DatasetDefinition(AmtModel):
-    source_tables: list[str] = Field(default_factory=list)
+    """What the campaign trains and evaluates on.
+
+    ``source_table``, ``columns``, ``filters`` and ``min_interactions_per_user``
+    are executed verbatim by :mod:`amt.jobs.materialize_splits`; the remaining
+    fields are the prose a human approves at HC3.
+    """
+
+    source_table: str = Field(
+        description=(
+            "The single fully-qualified table or view the splits are built from. "
+            "Must exist and be readable by the job; prepare a view upstream if the "
+            "interaction grain has to be derived from several tables."
+        )
+    )
+    columns: ColumnMap = Field(default_factory=ColumnMap)
+    filters: list[str] = Field(
+        default_factory=list,
+        description="SQL boolean predicates over source_table, ANDed onto every read.",
+    )
+    min_interactions_per_user: int = Field(
+        default=2, ge=1, description="Users below this interaction count are dropped."
+    )
+    source_tables: list[str] = Field(
+        default_factory=list, description="Every upstream table the dataset derives from."
+    )
     snapshot_id: str = Field(default="", description="Immutable snapshot identifier.")
     dataset_version: str = Field(default="", description="Delta version / materialization id.")
     population_eligibility: str = ""
@@ -40,12 +94,42 @@ class DatasetDefinition(AmtModel):
 
 
 class SplitPolicy(AmtModel):
-    """How each split may be used. Encoded so routing/jobs can enforce it."""
+    """How the splits are cut, and what each may be used for.
 
-    strategy: str = Field(default="temporal", description="temporal | random_by_user | ...")
-    boundaries: dict[str, str] = Field(default_factory=dict)
+    ``strategy`` and its boundaries/counts are executed by
+    :mod:`amt.jobs.materialize_splits`; the ``*_allowed`` flags are the policy
+    the graph and ``SplitGuard`` enforce.
+    """
+
+    strategy: SplitStrategy = "temporal"
+    # temporal: half-open windows (train <= train_end < validation <= ...).
+    train_end: str = Field(default="", description="Upper bound of train, e.g. '2026-09-07'.")
+    validation_end: str = Field(default="", description="Upper bound of validation.")
+    qa_end: str = Field(default="", description="Upper bound of QA; defaults to max(ts).")
+    # leave_last_n: per-user event counts instead of dates.
+    n_validation: int = Field(default=1, ge=1)
+    n_qa: int = Field(default=1, ge=1)
+    rationale: str = Field(default="", description="Why this cut fits the problem.")
     validation_reuse_allowed: bool = True
     qa_use_allowed_before_freeze: bool = Field(default=False, frozen=True)
+
+    @model_validator(mode="after")
+    def _check_boundaries(self) -> SplitPolicy:
+        if self.strategy == "temporal" and not (self.train_end and self.validation_end):
+            raise ValueError(
+                "a temporal split needs train_end and validation_end; "
+                "materialization has no other way to cut the source"
+            )
+        for name in ("train_end", "validation_end", "qa_end"):
+            value = getattr(self, name)
+            if value and not _INSTANT.match(value):
+                raise ValueError(
+                    f"{name}={value!r} is not a timestamp materialization can compare "
+                    "against: give the instant itself, e.g. '2026-09-07', "
+                    "'2026-09-07 00:00:00' or '2026-09-07 00:00:00 UTC', with no SQL "
+                    "around it"
+                )
+        return self
 
 
 class AcceptanceCriteria(AmtModel):
@@ -69,7 +153,7 @@ class EvaluationContract(AmtModel):
     train_split: SplitRef
     validation_split: SplitRef
     qa_split: SplitRef
-    split_policy: SplitPolicy = Field(default_factory=SplitPolicy)
+    split_policy: SplitPolicy
     user_population: str = ""
     item_population: str = ""
     label_definition: str = ""
@@ -100,6 +184,12 @@ class EvaluationContract(AmtModel):
         if self.acceptance_criteria.primary_metric != self.primary_metric:
             raise ValueError(
                 "acceptance_criteria.primary_metric must equal contract.primary_metric"
+            )
+        unknown = sorted(n for n in names | {self.primary_metric} if not is_harness_metric(n))
+        if unknown:
+            raise ValueError(
+                f"the harness cannot compute {unknown}; metrics must be named "
+                f"'{{recall|ndcg|hitrate|mrr|coverage}}@k', e.g. 'ndcg@10'"
             )
         return self
 

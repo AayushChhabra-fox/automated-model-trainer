@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -12,6 +13,24 @@ from pydantic import BaseModel, ConfigDict, Field
 
 SplitName = Literal["train", "validation", "qa"]
 MetricDirection = Literal["maximize", "minimize"]
+
+# The metrics the evaluation harness can actually compute, as ``family@k``.
+# Duplicated here rather than imported from ``amt.jobs.eval.harness`` so the
+# contracts stay free of the job runtime; ``tests/unit/test_harness.py``
+# asserts the two lists agree.
+HARNESS_METRIC_FAMILIES = ("recall", "ndcg", "hitrate", "mrr", "coverage")
+
+_HARNESS_METRIC = re.compile(rf"^({'|'.join(HARNESS_METRIC_FAMILIES)})@([1-9][0-9]*)$")
+
+
+def is_harness_metric(name: str) -> bool:
+    """Whether the harness computes ``name`` (``ndcg@10`` yes, ``PR-AUC`` no).
+
+    A contract may only pre-register metrics the harness produces: a primary
+    metric nothing computes cannot select a champion, and QA would compare
+    candidates on a number that never exists.
+    """
+    return bool(_HARNESS_METRIC.match(str(name).strip()))
 
 
 def utcnow() -> datetime:

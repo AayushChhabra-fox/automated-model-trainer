@@ -292,7 +292,16 @@ class DatabricksExecutor:
     # -- Executor protocol -------------------------------------------------
 
     def materialize_splits(self, contract: Any) -> Any:
-        payload = self._submit("materialize", contract=contract)
+        payload = self._submit(
+            "materialize",
+            contract=contract,
+            extra_parameters=[
+                "--split-catalog",
+                str(self.settings.catalog),
+                "--split-schema",
+                str(self.settings.schema_name),
+            ],
+        )
         return _to_split_materialization(payload, contract)
 
     def run_baseline(

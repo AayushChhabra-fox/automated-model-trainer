@@ -22,7 +22,12 @@ from amt.executor.local_mock import LocalMockExecutor, QaOutcome
 from amt.schemas.champion import FinalChampionSelection
 from amt.schemas.common import CohortDef, MetricDef
 from amt.schemas.conclusion import ProductInterpretation, ScientificConclusion
-from amt.schemas.evaluation_contract import AcceptanceCriteria, DatasetDefinition, TemporalRange
+from amt.schemas.evaluation_contract import (
+    AcceptanceCriteria,
+    DatasetDefinition,
+    SplitPolicy,
+    TemporalRange,
+)
 from amt.schemas.experiment_config import ExperimentConfig
 from amt.schemas.feature_recipe import (
     CandidateGeneration,
@@ -219,7 +224,10 @@ class CannedResponder:
         self._bump("contract")
         return EvaluationContractDraft(
             dataset=DatasetDefinition(
+                source_table=INTERACTIONS_TABLE,
                 source_tables=[INTERACTIONS_TABLE],
+                filters=["event_type = 'start'"],
+                min_interactions_per_user=3,
                 snapshot_id="snap-2026-08-01",
                 dataset_version="1",
                 population_eligibility="users with >=3 interactions in the training window",
@@ -228,21 +236,24 @@ class CannedResponder:
                 label_construction="start within the session window",
             ),
             train=SplitSpec(
-                table="main.amt.split_train",
                 description="first 10 weeks",
                 temporal_range=("2026-05-01", "2026-07-10"),
             ),
             validation=SplitSpec(
-                table="main.amt.split_validation",
                 description="following 2 weeks",
                 temporal_range=("2026-07-11", "2026-07-24"),
             ),
             qa=SplitSpec(
-                table="main.amt.split_qa",
                 description="final 1 week holdout",
                 temporal_range=("2026-07-25", "2026-08-01"),
             ),
-            split_strategy="temporal",
+            split_policy=SplitPolicy(
+                strategy="temporal",
+                train_end="2026-07-10",
+                validation_end="2026-07-24",
+                qa_end="2026-08-01",
+                rationale="Respects the deployment's forward-in-time prediction.",
+            ),
             user_population="eligible users active in the evaluation window",
             item_population="catalog items available for the full window",
             label_definition="start within the session window",

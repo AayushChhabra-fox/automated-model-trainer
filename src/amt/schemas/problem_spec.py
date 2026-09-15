@@ -5,9 +5,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
-from amt.schemas.common import AmtModel, MetricDef, new_id, stable_hash, utcnow
+from amt.schemas.common import (
+    AmtModel,
+    MetricDef,
+    is_harness_metric,
+    new_id,
+    stable_hash,
+    utcnow,
+)
 
 Measurability = Literal["offline", "offline_proxy", "simulated", "online_only"]
 BaselineKind = Literal["production_model", "existing_model", "heuristic", "popularity", "other"]
@@ -87,6 +94,18 @@ class ProblemSpec(AmtModel):
     assumptions: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     revision: int = 0
+
+    @model_validator(mode="after")
+    def _check_primary_offline_metric(self) -> ProblemSpec:
+        # Product metrics stay in product language; the offline metric the
+        # campaign optimizes has to be one the harness computes, or the
+        # contract derived from this spec could never be evaluated.
+        if not is_harness_metric(self.primary_offline_metric):
+            raise ValueError(
+                f"the harness cannot compute {self.primary_offline_metric!r}; "
+                "primary_offline_metric must be '{recall|ndcg|hitrate|mrr|coverage}@k'"
+            )
+        return self
 
     @property
     def spec_hash(self) -> str:
