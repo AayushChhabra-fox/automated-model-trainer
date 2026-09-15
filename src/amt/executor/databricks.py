@@ -71,7 +71,7 @@ class DatabricksExecutor:
         self.poll_seconds = poll_seconds
         self.timeout_seconds = timeout_seconds
         self.campaign_id = campaign_id
-        self.mlflow_experiment_id = mlflow_experiment_id
+        self._mlflow_experiment_id = mlflow_experiment_id or (settings.mlflow_experiment_id or "")
         self._wheel_uri: str | None = None
 
     # -- plumbing ---------------------------------------------------------
@@ -87,6 +87,26 @@ class DatabricksExecutor:
     @property
     def volume_path(self) -> str:
         return self.settings.artifact_volume
+
+    @property
+    def mlflow_experiment_id(self) -> str:
+        """The experiment every job logs into, created on first use.
+
+        Resolved here rather than at construction because a job cannot run without
+        one — a job whose ``--mlflow-experiment-id`` is missing dies inside MLflow
+        with "Could not find experiment with ID None" — while `amt status` must not
+        create workspace resources just by building an executor.
+        """
+        if not self._mlflow_experiment_id:
+            from amt.databricks.mlflow_client import get_or_create_experiment
+
+            if not self.campaign_id:
+                raise RuntimeError(
+                    "campaign_id is required to resolve an MLflow experiment; "
+                    "set AMT_MLFLOW_EXPERIMENT_ID to pin one explicitly."
+                )
+            self._mlflow_experiment_id = get_or_create_experiment(self.campaign_id, self.settings)
+        return self._mlflow_experiment_id
 
     def ensure_wheel(self, force: bool = False) -> str:
         if self._wheel_uri is None or force:
@@ -261,11 +281,20 @@ class DatabricksExecutor:
     # -- reading the result back ------------------------------------------
 
     def find_mlflow_run(self, job_run_id: str) -> Any:
-        """Locate the run the job created via its ``amt.job_run_id`` tag."""
+        """Locate the run the job created via its ``amt.job_run_id`` tag.
+
+        The tracking URI has to be set first.  MLflow's own default is a local
+        store, so an orchestrator that never said "databricks" searches its own
+        laptop for a run the cluster wrote and reports it missing.  Pinning
+        ``AMT_MLFLOW_EXPERIMENT_ID`` skips ``get_or_create_experiment``, which
+        is the only other thing that would have set it.
+        """
         from mlflow.tracking import MlflowClient
 
+        from amt.databricks.mlflow_client import set_tracking_uri
         from amt.executor.base import ExecutorError
 
+        set_tracking_uri(self.settings)
         client = MlflowClient()
         experiment_ids = (
             [str(self.mlflow_experiment_id)] if self.mlflow_experiment_id else None

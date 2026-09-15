@@ -66,23 +66,44 @@ def _mlflow() -> Any:
 
 
 def set_tracking_uri(settings: Settings | None = None) -> str:
-    """Point MLflow at Databricks-managed tracking."""
+    """Point MLflow at Databricks-managed tracking, as the identity AMT uses."""
+    from amt.databricks.client import pin_auth_env
+
     settings = settings or get_settings()
+    pin_auth_env(settings)
     mlflow = _mlflow()
     mlflow.set_tracking_uri(settings.mlflow_tracking_uri or "databricks")
     return mlflow.get_tracking_uri()
 
 
 def get_or_create_experiment(campaign_id: str, settings: Settings | None = None) -> str:
-    """One MLflow experiment per campaign: ``{root}/{campaign_id}``. Returns its id."""
+    """One MLflow experiment per campaign: ``{root}/{campaign_id}``. Returns its id.
+
+    A pinned ``mlflow_experiment_id`` wins over that default, and has to: jobs
+    are already told to log into it, so resolving a different experiment here
+    would scatter one campaign across two.
+    """
     settings = settings or get_settings()
     set_tracking_uri(settings)
+    if settings.mlflow_experiment_id:
+        return str(settings.mlflow_experiment_id)
     mlflow = _mlflow()
     name = settings.experiment_name(campaign_id)
     existing = mlflow.get_experiment_by_name(name)
     if existing is not None:
         return str(existing.experiment_id)
-    return str(mlflow.create_experiment(name))
+    try:
+        return str(mlflow.create_experiment(name))
+    except Exception as exc:
+        if "is not a directory" not in str(exc):
+            raise
+        raise RuntimeError(
+            f"cannot create the experiment {name!r}: the root "
+            f"{settings.mlflow_experiment_root!r} is itself an experiment, not a "
+            "workspace directory. Point AMT_MLFLOW_EXPERIMENT_ROOT at a directory, "
+            "or set AMT_MLFLOW_EXPERIMENT_ID to log every campaign into the "
+            "existing one."
+        ) from exc
 
 
 def log_final_run(

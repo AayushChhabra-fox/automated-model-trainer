@@ -213,8 +213,15 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, default=str))
         return 0 if result.get("status") not in {"failed"} else 1
 
-    if args.mlflow_experiment_id:
-        mlflow.set_experiment(experiment_id=str(args.mlflow_experiment_id))
+    experiment_id = args.mlflow_experiment_id or os.environ.get("MLFLOW_EXPERIMENT_ID", "")
+    if experiment_id:
+        mlflow.set_experiment(experiment_id=str(experiment_id))
+    elif "databricks" in str(mlflow.get_tracking_uri()):
+        # Databricks tracking has no usable default for a wheel-task run: MLflow
+        # would fail deep inside start_run with "Could not find experiment with ID None".
+        raise SystemExit(
+            "no MLflow experiment: pass --mlflow-experiment-id or set MLFLOW_EXPERIMENT_ID"
+        )
 
     with mlflow.start_run(run_name=f"{args.role}-{args.job_run_id or ''}".strip("-")):
         mlflow.set_tags(run_tags(args))

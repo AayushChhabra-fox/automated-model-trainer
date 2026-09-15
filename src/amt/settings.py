@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str = Field(
         default="databricks", validation_alias=AliasChoices("MLFLOW_TRACKING_URI")
     )
+    # Pin every job to one existing experiment instead of the per-campaign default.
+    mlflow_experiment_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AMT_MLFLOW_EXPERIMENT_ID", "MLFLOW_EXPERIMENT_ID"),
+    )
 
     # --- Agent models: ``provider:model_id`` (see ``amt.llm``) ----------------------
     planner_model: str = Field(

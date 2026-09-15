@@ -12,4 +12,5 @@ dist/
 .amt/
 *.sqlite
 *.sqlite-journal
+mlflow.db
 .DS_Store
