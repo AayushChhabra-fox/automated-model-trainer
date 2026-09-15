@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,21 @@ def _require(settings: Settings) -> None:
         )
 
 
+def pin_auth_env(settings: Settings | None = None) -> str:
+    """Name AMT's chosen identity in the environment; return its SDK auth type.
+
+    The SDK refuses to start when the environment describes two identities at
+    once, and AMT is not the only thing that builds a client from it: MLflow's
+    artifact repository constructs its own ``WorkspaceClient()``, which reads
+    the ambient environment and knows nothing of the precedence below.  Writing
+    the choice into ``DATABRICKS_AUTH_TYPE`` is what reaches those clients.
+    """
+    settings = settings or get_settings()
+    auth_type = "pat" if settings.databricks_token else "oauth-m2m"
+    os.environ["DATABRICKS_AUTH_TYPE"] = auth_type
+    return auth_type
+
+
 def get_workspace_client(settings: Settings | None = None) -> WorkspaceClient:
     """Build a ``WorkspaceClient`` for the configured identity.
 
@@ -46,6 +62,7 @@ def get_workspace_client(settings: Settings | None = None) -> WorkspaceClient:
     """
     settings = settings or get_settings()
     _require(settings)
+    pin_auth_env(settings)
     from databricks.sdk import WorkspaceClient  # imported lazily: keeps unit tests offline
 
     if settings.databricks_token:
