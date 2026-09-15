@@ -6,6 +6,11 @@ would add a minute to every trainer iteration.  The compromise is a
 content-addressed cache: the wheel is named after a hash of the source tree,
 so an unchanged tree resolves to an already-uploaded artifact and the build
 is skipped entirely.
+
+One consequence of the cache: a cached wheel keeps the build stamp it was first
+built with, so going *back* to a tree that was built earlier than the one a
+long-lived cluster already has installed needs ``force=True`` to count as an
+upgrade.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -22,13 +28,16 @@ from typing import Any
 __all__ = [
     "HASHED_PATHS",
     "WheelError",
+    "build_stamp",
     "build_wheel",
     "ensure_wheel",
+    "remote_wheel_dir",
     "remote_wheel_path",
     "repo_root",
     "source_tree_hash",
     "upload_bytes",
     "upload_wheel",
+    "uploaded_wheel",
     "wheel_exists",
 ]
 
@@ -76,11 +85,30 @@ def source_tree_hash(root: str | os.PathLike[str] | None = None) -> str:
     return digest.hexdigest()
 
 
-def build_wheel(root: str | os.PathLike[str] | None = None, out_dir: str | None = None) -> Path:
+def build_stamp(tree_hash: str, now: float | None = None) -> str:
+    """A PEP 440 local version that increases with every build.
+
+    The timestamp leads so pip compares builds numerically and always treats a
+    newer one as an upgrade; the hash makes the version name the source it came
+    from.
+    """
+    moment = time.gmtime(now) if now is not None else time.gmtime()
+    return f"{time.strftime('%Y%m%d%H%M%S', moment)}.{tree_hash[:12]}"
+
+
+def build_wheel(
+    root: str | os.PathLike[str] | None = None,
+    out_dir: str | None = None,
+    local_version: str = "",
+) -> Path:
     """Build a wheel with ``uv build`` (falling back to ``python -m build``)."""
     base = Path(root) if root else repo_root()
     dest = Path(out_dir or tempfile.mkdtemp(prefix="amt-wheel-"))
     dest.mkdir(parents=True, exist_ok=True)
+
+    env = dict(os.environ)
+    if local_version:
+        env["AMT_WHEEL_LOCAL_VERSION"] = local_version
 
     commands = []
     if shutil.which("uv"):
@@ -92,7 +120,7 @@ def build_wheel(root: str | os.PathLike[str] | None = None, out_dir: str | None 
     last: Exception | None = None
     for cmd in commands:
         try:
-            subprocess.run(cmd, cwd=str(base), check=True, capture_output=True)
+            subprocess.run(cmd, cwd=str(base), check=True, capture_output=True, env=env)
         except Exception as exc:
             last = exc
             continue
@@ -102,10 +130,20 @@ def build_wheel(root: str | os.PathLike[str] | None = None, out_dir: str | None 
     raise WheelError(f"wheel build failed in {base}: {last}")
 
 
+def remote_wheel_dir(volume_path: str, tree_hash: str) -> str:
+    """One directory per source-tree hash."""
+    return f"{volume_path.rstrip('/')}/wheels/{tree_hash[:12]}"
+
+
 def remote_wheel_path(volume_path: str, tree_hash: str, wheel_name: str) -> str:
-    """Content-addressed destination under the artifact Volume."""
-    stem = wheel_name[:-4] if wheel_name.endswith(".whl") else wheel_name
-    return f"{volume_path.rstrip('/')}/wheels/{stem}-{tree_hash[:12]}.whl"
+    """Content-addressed destination under the artifact Volume.
+
+    The hash is a directory rather than a filename suffix: pip parses wheel names
+    per PEP 427, and an extra segment after the platform tag is read as a build tag,
+    which must start with a digit. ``amt-0.1.0-py3-none-any-<hash>.whl`` is rejected
+    outright with "is not a valid wheel filename".
+    """
+    return f"{remote_wheel_dir(volume_path, tree_hash)}/{Path(wheel_name).name}"
 
 
 def upload_bytes(client: Any, remote_path: str, payload: bytes) -> str:
@@ -131,6 +169,19 @@ def wheel_exists(client: Any, remote_path: str) -> bool:
         return False
 
 
+def uploaded_wheel(client: Any, directory: str) -> str | None:
+    """The wheel already sitting in ``directory``, if any."""
+    try:
+        entries = list(client.files.list_directory_contents(directory))
+    except Exception:  # the directory simply does not exist yet
+        return None
+    for entry in entries:
+        path = str(getattr(entry, "path", "") or "")
+        if path.endswith(".whl"):
+            return path
+    return None
+
+
 def ensure_wheel(
     client: Any,
     volume_path: str,
@@ -148,14 +199,16 @@ def ensure_wheel(
     if not force and memo_key in _MEMO:
         return _MEMO[memo_key]
 
-    # Probe the conventional name first so a fresh process can skip the build.
-    probe = remote_wheel_path(volume_path, tree_hash, "amt-0-py3-none-any.whl")
-    if not force and wheel_exists(client, probe):
-        _MEMO[memo_key] = probe
-        return probe
+    # Look in the hash's directory first, so a fresh process can skip the build
+    # without having to guess what the built wheel will be called.
+    if not force:
+        existing = uploaded_wheel(client, remote_wheel_dir(volume_path, tree_hash))
+        if existing:
+            _MEMO[memo_key] = existing
+            return existing
 
     with tempfile.TemporaryDirectory(prefix="amt-wheel-") as tmp:
-        local = build_wheel(base, out_dir=tmp)
+        local = build_wheel(base, out_dir=tmp, local_version=build_stamp(tree_hash))
         remote = remote_wheel_path(volume_path, tree_hash, local.name)
         if force or not wheel_exists(client, remote):
             upload_wheel(client, local, remote)

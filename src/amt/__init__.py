@@ -1,3 +1,5 @@
 """AMT — Automated Model Trainer & QA Agent."""
 
-__version__ = "0.1.0"
+from amt._version import BASE_VERSION as __version__
+
+__all__ = ["__version__"]
