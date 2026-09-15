@@ -18,7 +18,8 @@ Dry-run the entire campaign with no network, no LLM and no Databricks:
 ```bash
 uv run amt start "Improve homepage row ranking" --campaign demo --mock
 uv run amt approve demo --mock          # HC2: ProblemSpec approved
-uv run amt approve demo --mock          # HC3: EvaluationContract approved -> autonomous
+uv run amt approve demo --mock          # HC3: EvaluationContract approved -> baseline
+uv run amt approve demo --mock          # HC_BACKLOG: hypotheses approved -> autonomous
 uv run amt status demo
 uv run amt report demo
 uv run amt promote demo --mock          # HC4: promotion decision
@@ -37,9 +38,14 @@ uv run amt reject demo -m "use a 30-day label window" --mock
 | 1 | initial product problem | `amt start "<problem>"` |
 | 2 | ProblemSpec approval | `amt approve` / `amt reject -m ...` |
 | 3 | EvaluationContract approval | `amt approve` / `amt reject -m ...` |
+| — | hypothesis backlog (`HC_BACKLOG`) | `amt approve` / `amt reject -m ...` |
+| — | feature/fit shape of a booster family (`HC_FEATURE`) | `amt approve` / `amt reject -m ...` |
 | 4 | scientific conclusion & promotion | `amt report`, `amt promote` |
 
-Everything between HC3 and HC4 runs autonomously inside the agreed experiment budget.
+The four numbered checkpoints are the ones SPEC.md requires. `HC_BACKLOG` and `HC_FEATURE` are
+additions: the first decides which hypotheses spend the budget, the second decides what a
+booster model is allowed to see. Everything else between HC3 and HC4 runs autonomously inside
+the agreed experiment budget.
 
 ## Layout
 
@@ -86,5 +92,4 @@ Known follow-ups (tracked in `docs/PLAN.md` §10 Phase D):
   pass the contract's tolerance through the executor.
 - Jobs ignore `EvaluationContract.metrics` when choosing `ks` (falls back to 5/10/20).
 - `Phase1Result.cohort_deltas` is not populated with per-cohort CIs yet.
-- `wheel.ensure_wheel` fast-path probes a wrong filename, so it rebuilds each process.
 - Real Databricks run has not been exercised end-to-end; start with `amt demo seed`.

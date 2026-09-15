@@ -14,7 +14,7 @@ AMT normally runs as a service principal. Create (or reuse) one and grant it:
 |---|---|---|
 | SQL warehouse (`DATABRICKS_WAREHOUSE_ID`) | `CAN USE` | Stage 1 read-only data probing |
 | Source tables | `SELECT` | Probing + split materialization |
-| `{catalog}.{schema}` | `USE SCHEMA`, `CREATE TABLE`, `MODIFY` | Writes `split_train/validation/qa` |
+| `{catalog}.{schema}` | `USE SCHEMA`, `CREATE TABLE`, `MODIFY` | Writes `<campaign>_split_train/validation/qa` |
 | `{catalog}.{schema}` volume `amt_artifacts` | `READ VOLUME`, `WRITE VOLUME` | Wheel + JSON payload uploads |
 | Workspace folder `/Shared/amt` | `CAN MANAGE` | MLflow experiments |
 | Cluster policy or existing cluster | create / attach | Job compute |
@@ -52,7 +52,8 @@ cp .env.example .env      # fill in values below
 | `AMT_VOLUME_PATH` | yes | `/Volumes/{catalog}/{schema}/amt_artifacts` |
 | `AMT_EXISTING_CLUSTER_ID` | one of | Reuse a running cluster (fastest iteration) |
 | `AMT_SPARK_VERSION` / `AMT_NODE_TYPE_ID` / `AMT_NUM_WORKERS` | one of | Or a per-run job cluster |
-| `AMT_MLFLOW_EXPERIMENT_ROOT` | no | Default `/Shared/amt` |
+| `AMT_MLFLOW_EXPERIMENT_ROOT` | no | Default `/Shared/amt`; one experiment per campaign underneath |
+| `AMT_MLFLOW_EXPERIMENT_ID` | no | Pin every job to one existing experiment instead |
 | `AMT_*_MODEL` | no | Per-agent model as `provider:model_id` (see §1.2.1) |
 | `AMT_CHECKPOINT_DB` | no | Default `~/.amt/checkpoints.sqlite` |
 
@@ -134,6 +135,16 @@ Write the problem the way you would brief a new ML engineer. Include:
 - the current baseline, if one exists;
 - constraints (latency, cold-start, fairness, catalog rules).
 
+AMT trains and evaluates **top-K recommendation over one `(user, item, timestamp)`
+interaction table**, and the harness computes only `recall@k`, `ndcg@k`, `hitrate@k`,
+`mrr@k` and `coverage@k`. The contract maps the source's real column names and carries its
+own SQL filters, so a raw event table usually needs no preparation — name it directly. Build
+a view upstream only when the grain has to be *derived* (a join, an occasion/session
+rollup), and name that view in the problem statement. A question at another grain
+altogether — per-impression CTR, position-corrected relevance, calibrated probabilities —
+cannot be pre-registered: its metrics are outside the vocabulary above and the contract will
+be rejected by its own validation.
+
 The Problem Specification Agent probes the tables you name (schema, volume, freshness, label
 availability, leakage) via read-only SQL, drafts a `ProblemSpec`, and the CLI stops at HC2.
 
@@ -162,22 +173,54 @@ approved, the spec is frozen for the campaign.
 After HC2 the system drafts the contract and materializes the three splits as Delta tables,
 then stops. Check:
 
-1. Temporal boundaries — train / validation / QA windows don't overlap and the QA window is
-   recent enough to matter.
-2. Population eligibility and exclusions — bots, internal users, min-interaction thresholds.
-3. Split references — `delta_version`, `row_count`, `membership_hash` are all present.
-4. Metric definitions and `harness_version` — matches what you expect to report.
-5. Acceptance criteria — the bar QA will hold the champion to. Set it now; it cannot move
+1. Temporal boundaries — `split_policy.train_end` / `validation_end` / `qa_end` don't
+   overlap and the QA window is recent enough to matter. These literals are what the job
+   cuts on, so a boundary that is only described in prose is a bug, not a nuance.
+2. The executable dataset block — `dataset.source_table` is the view you prepared,
+   `dataset.columns` are its real column names, and `dataset.filters` /
+   `min_interactions_per_user` are the eligibility you expect.
+3. Population eligibility and exclusions — bots, internal users, min-interaction thresholds.
+4. Split references — `delta_version`, `row_count`, `membership_hash` are all present.
+5. Metric definitions and `harness_version` — matches what you expect to report.
+6. Acceptance criteria — the bar QA will hold the champion to. Set it now; it cannot move
    later.
 
 ```bash
 uv run amt approve <campaign>
 ```
 
-Approval stamps `contract_hash`. From here to HC4 the campaign is autonomous.
+Approval stamps `contract_hash`.
 
 If you reject at HC3 the splits are re-materialized. If you later realize the contract is wrong
 (after training has started), do not edit anything — start a new campaign. That is by design.
+
+### 2.3a HC_BACKLOG — approve the hypothesis backlog
+
+After HC3 the baseline runs and the Planner writes the campaign's whole backlog at once, then
+stops. This is the only point at which you see every hypothesis before compute is spent on any
+of them, and the backlog decides how the budget is spent:
+
+```bash
+uv run amt show    <campaign>    # the full backlog, not the truncated panel
+uv run amt approve <campaign>
+uv run amt reject  <campaign> -m "drop H4: pr_item_feature metadata is not in the contract"
+```
+
+Read each hypothesis against what this campaign can actually run:
+
+1. Testable here — the experiment design only needs the frozen splits, the contract's metrics,
+   and transforms the `FeatureRecipe` can express. A hypothesis about trailing-window demand or
+   item-pair affinity has nothing to run on today; strike it rather than discovering that at
+   HC_FEATURE.
+2. Falsifiable — `falsification_criteria` names a result that would kill it, not a hedge.
+3. Worth the compute — `estimated_cost_minutes` against `max_compute_minutes`, priority order
+   matching what you'd want tried first if the budget runs out early.
+4. Different from each other — variations of one idea waste hypotheses.
+
+A rejection returns the whole backlog to the Planner with your feedback: hypotheses you did not
+object to come back intact, the rest are dropped or replaced. Approval is once per campaign; the
+Planner then works down the list unattended, and between here and HC4 only the booster families
+stop again.
 
 ### 2.3b HC_FEATURE — approve the feature recipe (booster families only)
 
@@ -260,7 +303,9 @@ A negative result is a finished campaign. The MLflow final run holds the report 
 | Waiting on you but you forgot which checkpoint | `uv run amt status <campaign>` prints `awaiting HC*`. |
 | Databricks job failed (cluster, quota, OOM) | Fix the cause; `amt resume`. The trainer sees `status=failed` in the result and adapts (smaller batch, fewer layers). Three consecutive failures count against the iteration budget. |
 | Auth error (`401`, `invalid_client`) | Rotate the SP secret, update `.env`, `amt resume`. |
+| `more than one authorization method configured: oauth and pat` | Your `.env` holds both a PAT and the service-principal pair. AMT prefers the PAT and now pins that choice in `DATABRICKS_AUTH_TYPE` for libraries that build their own client; if you see this from a tool outside AMT, export `DATABRICKS_AUTH_TYPE=pat` or drop one identity. |
 | Wheel upload fails | Check `AMT_VOLUME_PATH` exists and SP has `WRITE VOLUME`. |
+| A job dies on an argument the code should know (`amt-job: error: unrecognized arguments`) | The cluster is serving an older `amt` install. Each build now carries its own version, so this only happens on a cluster that collected same-version wheels earlier, or after reverting to a tree built before the installed one: `uv run python scripts/clear_cluster_wheels.py $AMT_EXISTING_CLUSTER_ID`, then `amt resume`. |
 | Phase 0 `INVALID_EXPERIMENT` once or twice | Normal — usually a serialization or schema-signature issue. The system fixes plumbing and retries automatically. Only three strikes is terminal. |
 | You want to change the contract | You can't. `amt start` a new campaign. |
 | Checkpoint DB corrupted | Delete `~/.amt/checkpoints.sqlite`; the campaign is lost locally but every run remains in MLflow. |
@@ -335,8 +380,8 @@ native library cannot load.
 
 ```bash
 amt start "<problem>" -c <id> [--max-iterations N] [--max-hypotheses N] [--max-compute-minutes M] [--mock]
-amt approve <id>                 # HC2 / HC3 / HC_FEATURE
-amt reject  <id> -m "<feedback>" # HC2 / HC3 / HC_FEATURE, re-runs the stage
+amt approve <id>                 # HC2 / HC3 / HC_BACKLOG / HC_FEATURE
+amt reject  <id> -m "<feedback>" # same checkpoints; re-runs the stage with the feedback
 amt status  <id>                 # compact state + which checkpoint is pending
 amt resume  <id>                 # continue after crash / kill
 amt report  <id>                 # Scientific Conclusion + MLflow refs (HC4)

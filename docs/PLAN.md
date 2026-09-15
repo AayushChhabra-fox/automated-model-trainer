@@ -140,7 +140,9 @@ class CampaignState(TypedDict, total=False):
 START → problem_spec → [interrupt HC2] ─rejected→ problem_spec
                       └approved→ evaluation_contract → materialize_splits → [interrupt HC3]
                             ─rejected→ evaluation_contract
-                            └approved→ run_baseline → planner_select_hypothesis
+                            └approved→ run_baseline → planner_hypotheses
+planner_hypotheses → [interrupt HC_BACKLOG] ─rejected→ planner_hypotheses
+                                            └approved→ planner_select_hypothesis
 planner_select_hypothesis ─no hypotheses left / budget→ planner_final_champion
                           ─tabular family, shape not approved→ planner_feature_fit
                           └→ trainer_propose → execute_training → trainer_interpret
@@ -157,6 +159,8 @@ qa_decision = SPEC_REVIEW → conclusion (status=spec_review) → [interrupt HC4
 
 Rules enforced in `routing.py`, not prompts: trainer loop cannot exceed `plan.max_iterations`; `execute_training` refuses if `contract_hash` differs from the one stamped at HC3; `qa_*` refuses if `frozen_champion is None` or more than one champion; `execute_training` refuses a booster family whose `feature_fit_hash` is not the one approved at HC_FEATURE.
 
+HC_BACKLOG gates the hypothesis backlog: the Planner writes it once, after the baseline, and no hypothesis is planned until a human approves the list. A rejection revises the backlog with the feedback (hypotheses the feedback did not object to survive intact); approval happens once per campaign, not once per hypothesis. `planner_select_hypothesis` never generates hypotheses, so there is no path into training that skips the gate.
+
 HC_FEATURE gates the declarative feature/fit shape of the booster families: one approval per hypothesis, hyperparameter-only iterations run unattended, and any structural change to the `FeatureRecipe` or `FitSpec` re-enters the checkpoint. `popularity` and `sasrec` skip it.
 
 ## 5. Executor contract
@@ -172,7 +176,9 @@ class Executor(Protocol):
 
 `DatabricksExecutor`: builds wheel once per campaign (hash-cached) → uploads to `/Volumes/{catalog}/{schema}/amt_artifacts/` → `jobs.submit` with `python_wheel_task(package_name="amt", entry_point="amt-job", parameters=[...])` → polls to terminal state → reads the result JSON logged as MLflow artifact `result.json` on the run tagged with the job's `run_uuid`. Job cluster spec from settings (or `existing_cluster_id`).
 
-Job parameters include `--role train|qa|baseline|materialize` and `--allowed-splits`. `SplitGuard` in `jobs/data/loaders.py` raises if code requests a split outside `allowed_splits`. Train jobs get `train,validation`; QA jobs get `qa` (+ `validation` only for Phase-0 reproduction subset).
+Job parameters include `--role train|qa|baseline|materialize` and `--allowed-splits`. `SplitGuard` in `jobs/data/loaders.py` raises if code requests a split outside `allowed_splits`. Train jobs get `train,validation`; QA jobs get `qa` (+ `validation` only for Phase-0 reproduction subset). `materialize` additionally gets `--split-catalog/--split-schema` from settings: where the splits are written is a deployment fact, so it is passed per run rather than frozen into the contract.
+
+A job runs on a cluster with no AMT settings and no access to the prose a human approved, so everything it executes has to be a field the contract carries: `dataset.source_table`, `dataset.columns`, `dataset.filters`, `dataset.min_interactions_per_user` and `split_policy` (strategy plus boundaries or per-user counts). A role that fails logs `result.json` and then *raises* — a wheel task's return value is discarded, so returning non-zero would report SUCCESS with a failed result.
 
 ## 6. Evaluation harness
 
@@ -194,6 +200,8 @@ amt start "Improve homepage row ranking for Tubi..." --campaign my-campaign
    → runs to HC2, prints ProblemSpec, exits with "awaiting approval"
 amt approve my-campaign            # resumes; runs to HC3
 amt reject my-campaign -m "use 30-day label window"   # feeds back, re-runs stage
+amt approve my-campaign            # resumes; baseline, then stops at HC_BACKLOG
+   → the whole hypothesis backlog, once per campaign; reject to have it revised
 amt approve my-campaign            # resumes; autonomous until HC4
    → booster families stop once more at HC_FEATURE with the proposed
      FeatureRecipe + FitSpec; approve / reject the same way
@@ -212,8 +220,9 @@ Checkpointer DB at `~/.amt/checkpoints.sqlite`; thread_id = campaign_id.
 4. Graph routing prevents QA before freeze and prevents trainer re-entry after freeze.
 5. `FrozenChampion` is a frozen Pydantic model (`model_config = ConfigDict(frozen=True)`); QA takes exactly one.
 6. Harness version pinned in contract; jobs assert.
-7. `feature_fit_hash` approved at HC_FEATURE; `execute_training` asserts equality, and the booster runtime accepts only the closed transform vocabulary (no SQL, no agent-authored Python) and never a `qa` source.
-8. Optional (documented in README): second SP for QA jobs with grants only on `split_qa`.
+7. The backlog reaches the Trainer only through HC_BACKLOG: `planner_select_hypothesis` raises rather than inventing hypotheses when state carries none.
+8. `feature_fit_hash` approved at HC_FEATURE; `execute_training` asserts equality, and the booster runtime accepts only the closed transform vocabulary (no SQL, no agent-authored Python) and never a `qa` source.
+9. Optional (documented in README): second SP for QA jobs with grants only on `split_qa`.
 
 ## 10. Implementation phases (Opus)
 

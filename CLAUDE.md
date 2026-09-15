@@ -13,9 +13,11 @@ Autonomous ML experimentation system on Databricks: LangGraph orchestrator (loca
 - Anything that executes on Databricks lives in `src/amt/jobs/` and must not import LangGraph/LLM code.
 - Split access in jobs goes through `SplitGuard` only. Train/validation jobs never receive `qa` in `allowed_splits`.
 - Every node and job asserts `contract_hash` matches the frozen EvaluationContract.
+- The contract carries the fields materialization executes (`dataset.source_table`, `dataset.columns`, `dataset.filters`, `split_policy` boundaries); its metrics are limited to what the harness computes — `{recall|ndcg|hitrate|mrr|coverage}@k`.
 - Never duplicate MLflow detail into `CampaignState`; store IDs/references.
 - Secrets only via env (`DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`, `AMT_LLM_API_KEY`).
 - Agents are provider-agnostic: models are named `provider:model_id` and built in `src/amt/llm.py`. Never import a provider SDK outside that module.
+- The hypothesis backlog is written once, after the baseline, and approved at `HC_BACKLOG` before any hypothesis is planned. `planner_select_hypothesis` selects; it never generates.
 - The booster families (`xgboost_*`, `lightgbm_*`) take their inputs from a `FeatureRecipe` + `FitSpec` approved at `HC_FEATURE`. Only the closed transform vocabulary is executable, and `execute_training` refuses a config whose `feature_fit_hash` is not the approved one.
 
 ## Commands
