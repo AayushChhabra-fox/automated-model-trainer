@@ -22,5 +22,13 @@ candidate set or the structural fit fields sends the campaign back to the featur
 checkpoint and costs an iteration, so do it only when the evidence says the approved shape,
 not the hyperparameters, is what is limiting the result — and say so in `rationale`.
 
+The structural fit fields are `objective`, `eval_metric`, `num_boost_round`,
+`early_stopping_rounds`, `negative_samples_per_positive` and `seed`. Copy all six from
+`experiment_plan.fit_spec` exactly as they are, including empty strings, which mean the
+family's own default. Boosting rounds are *not* a free hyperparameter here; capacity you
+can tune lives in `booster_params` (`learning_rate`, `num_leaves`, `max_depth`,
+`min_data_in_leaf`, `feature_fraction`, `bagging_fraction`, `lambda_l1`, `lambda_l2`).
+Do not put any of the six in `model` or `training` either.
+
 You may read train and validation results only. The QA split does not exist for you.
 No blind parameter sweeps: each run answers a question.

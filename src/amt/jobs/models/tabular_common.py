@@ -104,6 +104,7 @@ def resolve_cfg(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
     Trainer's ``model`` / ``training`` sections. Anything that is not a known
     AMT knob is a booster hyperparameter and nothing else is passed to the
     booster -- campaign plumbing (ids, prose, hashes) must not leak into it.
+    ``loss.type`` applies only to configs without a recipe; see below.
     """
     cfg = dict(cfg or {})
     flat = dict(DEFAULTS)
@@ -129,7 +130,10 @@ def resolve_cfg(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
                 booster[key] = value
 
     loss = cfg.get("loss")
-    if isinstance(loss, Mapping) and loss.get("type"):
+    if isinstance(loss, Mapping) and loss.get("type") and not cfg.get("feature_recipe"):
+        # With a recipe the objective is part of the shape a human approved, so
+        # the Trainer's free-form `loss` cannot redirect it -- it names losses
+        # the boosters do not have (`pairwise_ranking`).
         flat["objective"] = loss["type"]
 
     flat.update({k: v for k, v in cfg.items() if k in FIT_KNOBS})
