@@ -225,7 +225,11 @@ def main(argv: list[str] | None = None) -> int:
             log_result(result, mlflow)
             mlflow.set_tag("amt.status", "failed")
             traceback.print_exc()
-            return 1
+            # Databricks calls this entry point as a function and discards the
+            # return value, so returning non-zero would leave the run SUCCESS
+            # and the executor would read a failed result.json as a result.
+            # Propagating is the only thing that marks the run FAILED.
+            raise
         result.setdefault("status", "success")
         result.setdefault("runtime_seconds", time.time() - started)
         result.setdefault("mlflow_run_id", mlflow.active_run().info.run_id)

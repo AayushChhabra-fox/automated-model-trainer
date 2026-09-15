@@ -192,16 +192,21 @@ def wait_for_terminal(
     return run
 
 
-def get_run_output(client: Any, run: Any) -> str:
-    """Best-effort driver output for a failed run, for error reporting."""
+def get_run_output(client: Any, run: Any, max_chars: int = 4000) -> str:
+    """Best-effort driver output for a failed run, for error reporting.
+
+    ``error`` alone is often just the exception type (a wheel entry point that
+    exits non-zero reports ``SystemExit: 2``), so the logs come along too.
+    """
     tasks = getattr(run, "tasks", None) or []
+    parts: list[str] = []
     for task in tasks:
         try:
             output = client.jobs.get_run_output(run_id=task.run_id)
         except Exception:  # pragma: no cover - diagnostics only
             continue
-        for attr in ("error", "error_trace", "logs"):
-            value = getattr(output, attr, None)
+        for attr in ("error", "logs"):
+            value = str(getattr(output, attr, None) or "").strip()
             if value:
-                return str(value)
-    return ""
+                parts.append(value[-max_chars:])
+    return "\n".join(parts)

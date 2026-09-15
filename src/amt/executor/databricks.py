@@ -20,6 +20,7 @@ job-side context.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -210,6 +211,7 @@ class DatabricksExecutor:
         parameters += list(extra_parameters)
 
         started = time.time()
+        run_id: int | None = None
         try:
             run_id = jobs_mod.submit_run(
                 self.client,
@@ -225,7 +227,7 @@ class DatabricksExecutor:
                 timeout_seconds=self.timeout_seconds,
             )
         except jobs_mod.JobRunError as exc:
-            raise ExecutorError(str(exc)) from exc
+            raise ExecutorError(self._failure_detail(str(exc), job_run_id, run_id)) from exc
 
         payload = self.fetch_result(job_run_id)
         payload.setdefault("runtime_seconds", time.time() - started)
@@ -237,6 +239,24 @@ class DatabricksExecutor:
         payload["databricks_run_id"] = run_id
         payload["run_page_url"] = jobs_mod.run_page_url(run)
         return payload
+
+    def _failure_detail(self, message: str, job_run_id: str, run_id: int | None = None) -> str:
+        """``message`` plus whatever the job said about why it died.
+
+        A Databricks run state says only *that* the run failed.  A job that
+        reached its role reports the reason (a missing grant, a bad query) in
+        the ``result.json`` it logs before dying.  A job that died earlier --
+        a stale wheel, an argument the installed code does not know -- never
+        got an MLflow run, and the driver output is the only account of it.
+        """
+        error = ""
+        # Diagnostics only: neither lookup may mask the real failure.
+        with contextlib.suppress(Exception):
+            error = str(self.fetch_result(job_run_id).get("error") or "").strip()
+        if not error and run_id is not None:
+            with contextlib.suppress(Exception):
+                error = jobs_mod.get_run_output(self.client, jobs_mod.get_run(self.client, run_id))
+        return f"{message}\n{error}" if error else message
 
     # -- reading the result back ------------------------------------------
 
