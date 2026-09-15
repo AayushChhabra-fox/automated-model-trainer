@@ -130,7 +130,7 @@ def _clip(text: str) -> tuple[str, bool]:
 
 def checkpoint_document(payload: dict) -> Any:
     """The part of an interrupt payload a human actually decides on."""
-    for key in ("problem_spec", "evaluation_contract", "feature_fit", "conclusion"):
+    for key in ("problem_spec", "evaluation_contract", "hypotheses", "feature_fit", "conclusion"):
         if payload.get(key):
             return payload[key]
     return payload

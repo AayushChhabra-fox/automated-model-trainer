@@ -23,3 +23,13 @@ is the strongest candidate to run first.
 Keep the backlog small: a handful of genuinely different ideas beats a long list of
 variations. The objective is not to maximise the number of experiments; it is to determine
 efficiently whether a hypothesis produces a reproducible, meaningful improvement.
+
+A human approves this backlog before any of it is planned, so propose nothing this campaign
+cannot actually run: every hypothesis must be testable with the frozen EvaluationContract,
+the metrics it names, and the feature transforms the booster runtime executes. A hypothesis
+that needs a transform the `FeatureRecipe` cannot express is not a hypothesis for this
+campaign — leave it out and say so in `prioritization_rationale`.
+
+When `existing_hypotheses` and `human_feedback` are present the backlog was rejected: return
+the revised backlog. Keep the hypotheses the feedback did not object to, with their ids and
+wording intact, drop or replace the ones it did, and reprioritise what remains.

@@ -25,7 +25,7 @@ def resume(graph, config, **payload):
 
 
 def run_to_hc4(graph, config, campaign_id="test-campaign"):
-    """HC1 → HC2 (reject, then approve) → HC3 (approve) → autonomous → HC4."""
+    """HC1 → HC2 (reject, then approve) → HC3 → HC_BACKLOG → autonomous → HC4."""
     hc2 = start(graph, config, campaign_id)
     assert hc2 and hc2["checkpoint"] == "HC2"
 
@@ -34,6 +34,9 @@ def run_to_hc4(graph, config, campaign_id="test-campaign"):
 
     hc3 = resume(graph, config, approved=True)
     assert hc3 and hc3["checkpoint"] == "HC3"
+
+    backlog = resume(graph, config, approved=True)
+    assert backlog and backlog["checkpoint"] == "HC_BACKLOG"
 
     hc4 = resume(graph, config, approved=True)
     return hc4
@@ -124,6 +127,7 @@ def test_contract_hash_is_constant_for_the_whole_campaign(campaign):
     resume(graph, config, approved=True)
 
     stamped_at_hc3 = graph_state(graph, config)["evaluation_contract"].contract_hash
+    resume(graph, config, approved=True)  # HC_BACKLOG
     resume(graph, config, approved=True)
 
     state = graph_state(graph, config)
@@ -234,6 +238,50 @@ def test_qa_agent_never_sees_training_configuration_choices(campaign):
     assert responder.calls.index("QAAssessment") > responder.calls.index("ChampionSelection")
 
 
+# --- backlog checkpoint ------------------------------------------------------------------
+def test_the_whole_backlog_is_presented_before_any_hypothesis_is_planned(campaign):
+    graph, config, executor, responder = campaign(n_hypotheses=2)
+    start(graph, config)
+    resume(graph, config, approved=True)  # HC2
+    backlog = resume(graph, config, approved=True)  # HC3
+
+    assert backlog and backlog["checkpoint"] == "HC_BACKLOG"
+    assert len(backlog["hypotheses"]) == 2
+    assert all(h["status"] == "pending" for h in backlog["hypotheses"])
+    # The baseline is known by then, so the human judges the backlog against it.
+    assert backlog["baseline_run_id"]
+    assert "run_baseline:validation" in executor.calls
+    assert "run_training" not in executor.calls
+    assert graph_state(graph, config)["experiment_plan"] is None
+
+
+def test_rejecting_the_backlog_revises_it_and_still_trains_nothing(campaign):
+    graph, config, executor, responder = campaign()
+    start(graph, config)
+    resume(graph, config, approved=True)
+    resume(graph, config, approved=True)
+
+    again = resume(graph, config, approved=False, feedback="drop anything needing item metadata")
+    assert again and again["checkpoint"] == "HC_BACKLOG"
+    assert responder.counts["backlog"] == 2
+    assert "item metadata" in again["prioritization_rationale"], "feedback must reach the revision"
+    assert "run_training" not in executor.calls
+    assert graph_state(graph, config)["hypotheses_approved"] is False
+
+    resume(graph, config, approved=True)
+    state = graph_state(graph, config)
+    assert state["hypotheses_approved"] is True
+    assert executor.training_calls
+
+
+def test_the_backlog_is_approved_once_not_once_per_hypothesis(campaign):
+    graph, config, executor, responder = campaign(n_hypotheses=2)
+    hc4 = run_to_hc4(graph, config)
+    assert hc4 and hc4["checkpoint"] == "HC4"
+    assert responder.counts["backlog"] == 1
+    assert len(graph_state(graph, config)["hypothesis_champions"]) == 2
+
+
 def test_multiple_hypotheses_produce_one_final_champion(campaign):
     graph, config, executor, responder = campaign(n_hypotheses=2)
     run_to_hc4(graph, config)
@@ -252,6 +300,8 @@ def run_tabular_to_hc4(graph, config, campaign_id="test-campaign", reject_first_
     assert hc2 and hc2["checkpoint"] == "HC2"
     hc3 = resume(graph, config, approved=True)
     assert hc3 and hc3["checkpoint"] == "HC3"
+    backlog = resume(graph, config, approved=True)
+    assert backlog and backlog["checkpoint"] == "HC_BACKLOG"
 
     hc_feature = resume(graph, config, approved=True)
     assert hc_feature and hc_feature["checkpoint"] == "HC_FEATURE"

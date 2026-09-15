@@ -27,8 +27,10 @@ from amt.graph.nodes.evaluation_contract import (
 )
 from amt.graph.nodes.planner import (
     make_hc_feature_fit_node,
+    make_hc_hypotheses_node,
     make_planner_feature_fit_node,
     make_planner_final_champion_node,
+    make_planner_hypotheses_node,
     make_planner_select_hypothesis_node,
 )
 from amt.graph.nodes.problem_spec import make_hc_problem_spec_node, make_problem_spec_node
@@ -41,6 +43,7 @@ from amt.graph.nodes.trainer import (
 from amt.graph.routing import (
     route_after_hc_contract,
     route_after_hc_feature_fit,
+    route_after_hc_hypotheses,
     route_after_hc_problem_spec,
     route_after_planner_select,
     route_after_qa_phase0,
@@ -93,6 +96,8 @@ def build_graph(
     graph.add_node("materialize_splits", make_materialize_splits_node(deps))
     graph.add_node("hc_contract", make_hc_contract_node(deps))
     graph.add_node("run_baseline", make_run_baseline_node(deps))
+    graph.add_node("planner_hypotheses", make_planner_hypotheses_node(deps))
+    graph.add_node("hc_hypotheses", make_hc_hypotheses_node(deps))
     graph.add_node("planner_select_hypothesis", make_planner_select_hypothesis_node(deps))
     graph.add_node("planner_feature_fit", make_planner_feature_fit_node(deps))
     graph.add_node("hc_feature_fit", make_hc_feature_fit_node(deps))
@@ -123,7 +128,16 @@ def build_graph(
         route_after_hc_contract,
         {"evaluation_contract": "evaluation_contract", "run_baseline": "run_baseline"},
     )
-    graph.add_edge("run_baseline", "planner_select_hypothesis")
+    graph.add_edge("run_baseline", "planner_hypotheses")
+    graph.add_edge("planner_hypotheses", "hc_hypotheses")
+    graph.add_conditional_edges(
+        "hc_hypotheses",
+        route_after_hc_hypotheses,
+        {
+            "planner_hypotheses": "planner_hypotheses",
+            "planner_select_hypothesis": "planner_select_hypothesis",
+        },
+    )
     graph.add_conditional_edges(
         "planner_select_hypothesis",
         route_after_planner_select,

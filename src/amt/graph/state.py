@@ -29,6 +29,7 @@ class Stage(str, Enum):
     PROBLEM_SPEC = "problem_spec"
     EVALUATION_CONTRACT = "evaluation_contract"
     BASELINE = "baseline"
+    HYPOTHESES = "hypotheses"
     PLANNING = "planning"
     FEATURE_FIT = "feature_fit"
     TRAINING = "training"
@@ -64,7 +65,10 @@ class CampaignState(TypedDict, total=False):
     # Stage 3-7 — experimentation
     baseline_run_id: str | None
     mlflow_experiment_id: str
+    # The backlog is written once and approved once, before any hypothesis is planned.
     hypotheses: list[Hypothesis]
+    backlog_rationale: str
+    hypotheses_approved: bool
     current_hypothesis_id: str | None
     experiment_plan: ExperimentPlan | None
     current_config: ExperimentConfig | None
@@ -130,6 +134,8 @@ def new_campaign_state(
         baseline_run_id=None,
         mlflow_experiment_id="",
         hypotheses=[],
+        backlog_rationale="",
+        hypotheses_approved=False,
         current_hypothesis_id=None,
         experiment_plan=None,
         current_config=None,
@@ -177,13 +183,15 @@ def describe(state: CampaignState) -> dict[str, Any]:
     feature_fit = (state.get("feature_fit_hash") or "")[:12] or "n/a"
     if state.get("feature_fit_approved"):
         feature_fit = f"{feature_fit} (approved)"
+    backlog = len(state.get("hypotheses") or [])
+    hypotheses = f"{backlog} (approved)" if state.get("hypotheses_approved") else str(backlog)
     return {
         "campaign_id": state.get("campaign_id"),
         "stage": state.get("stage"),
         "status": state.get("status"),
         "awaiting": state.get("awaiting"),
         "contract_hash": (state.get("contract_hash") or "")[:12],
-        "hypotheses": len(state.get("hypotheses") or []),
+        "hypotheses": hypotheses,
         "current_hypothesis": state.get("current_hypothesis_id"),
         "feature_fit": feature_fit,
         "iteration": state.get("iteration", 0),

@@ -11,6 +11,7 @@ from amt.graph.routing import (
     assert_not_frozen,
     assert_ready_for_qa,
     route_after_hc_contract,
+    route_after_hc_hypotheses,
     route_after_hc_problem_spec,
     route_after_planner_select,
     route_after_qa_decision,
@@ -53,6 +54,11 @@ def test_hc2_rejection_returns_to_problem_spec():
 def test_hc3_rejection_returns_to_contract():
     assert route_after_hc_contract({"contract_approved": False}) == "evaluation_contract"
     assert route_after_hc_contract({"contract_approved": True}) == "run_baseline"
+
+
+def test_a_rejected_backlog_is_revised_before_anything_is_planned():
+    assert route_after_hc_hypotheses({"hypotheses_approved": False}) == "planner_hypotheses"
+    assert route_after_hc_hypotheses({"hypotheses_approved": True}) == "planner_select_hypothesis"
 
 
 # --- contract hash ------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 These rules are code, not prompts. An agent cannot talk its way past them:
 
+* no hypothesis is planned before a human approves the backlog;
 * the trainer loop cannot exceed ``plan.max_iterations`` (or the campaign budget);
 * a tabular booster never trains on a feature/fit shape a human has not approved;
 * every stage after HC3 asserts the frozen ``contract_hash``;
@@ -129,6 +130,11 @@ def route_after_hc_problem_spec(state: CampaignState) -> str:
 def route_after_hc_contract(state: CampaignState) -> str:
     """HC3: rejected → redraft the contract; approved → baseline, then autonomous."""
     return "run_baseline" if state.get("contract_approved") else "evaluation_contract"
+
+
+def route_after_hc_hypotheses(state: CampaignState) -> str:
+    """HC_BACKLOG: rejected → revise the backlog; approved → plan the first hypothesis."""
+    return "planner_select_hypothesis" if state.get("hypotheses_approved") else "planner_hypotheses"
 
 
 def route_after_planner_select(state: CampaignState) -> str:

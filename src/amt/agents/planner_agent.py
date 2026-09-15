@@ -24,7 +24,9 @@ class PlannerAgent(AgentBase):
         contract: EvaluationContract,
         history: list[RunSummary] | None = None,
         existing: list[Hypothesis] | None = None,
+        human_feedback: str | None = None,
     ) -> HypothesisBacklog:
+        """The campaign backlog. Presented for human approval before anything is planned."""
         agent = self.agent("planner.hypotheses", "planner_hypotheses", HypothesisBacklog)
         return agent.invoke(
             {
@@ -32,6 +34,7 @@ class PlannerAgent(AgentBase):
                 "evaluation_contract": contract,
                 "experiment_history": [h.model_dump() for h in history or []],
                 "existing_hypotheses": [h.model_dump() for h in existing or []],
+                "human_feedback": human_feedback,
             }
         )
 

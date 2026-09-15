@@ -14,8 +14,67 @@ from amt.schemas.common import ExperimentBudget
 from amt.schemas.feature_recipe import feature_fit_hash, is_tabular_family
 
 
+def make_planner_hypotheses_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
+    """Write the campaign's whole hypothesis backlog, for a human to read at once."""
+
+    def planner_hypotheses_node(state: CampaignState) -> dict:
+        contract = state.get("evaluation_contract")
+        spec = state.get("problem_spec")
+        assert_contract_hash(state, contract)
+        backlog = deps.planner_agent.propose_hypotheses(
+            spec,
+            contract,
+            history=list(state.get("experiment_history") or []),
+            existing=list(state.get("hypotheses") or []),
+            human_feedback=state.get("human_feedback"),
+        )
+        return {
+            "stage": Stage.HYPOTHESES.value,
+            "status": "running",
+            "hypotheses": sorted(backlog.hypotheses, key=lambda h: (h.priority, -h.confidence)),
+            "backlog_rationale": backlog.prioritization_rationale,
+            "hypotheses_approved": False,
+            "human_feedback": None,
+        }
+
+    return planner_hypotheses_node
+
+
+def make_hc_hypotheses_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
+    """HC_BACKLOG — a human approves *what will be tried* before any of it is planned.
+
+    The SPEC leaves the space between HC3 and HC4 autonomous, so this gate is not
+    one of its four; it exists because the backlog decides how the whole compute
+    budget is spent, and a human reading all of it at once can strike what this
+    harness cannot honestly test.
+    """
+
+    def hc_hypotheses_node(state: CampaignState) -> dict:
+        hypotheses = list(state.get("hypotheses") or [])
+        payload = interrupt(
+            {
+                "checkpoint": "HC_BACKLOG",
+                "title": "Hypothesis backlog approval",
+                "campaign_id": state.get("campaign_id"),
+                "hypotheses": [h.model_dump(mode="json") for h in hypotheses],
+                "prioritization_rationale": state.get("backlog_rationale") or "",
+                "baseline_run_id": state.get("baseline_run_id"),
+                "instructions": "amt approve <campaign> | amt reject <campaign> -m '<feedback>'",
+            }
+        )
+        decision = parse_resume(payload)
+        return {
+            "hypotheses_approved": decision.approved,
+            "human_feedback": decision.feedback,
+            "awaiting": None,
+            "status": "running",
+        }
+
+    return hc_hypotheses_node
+
+
 def make_planner_select_hypothesis_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
-    """Generate the backlog once, then hand the Trainer one hypothesis at a time."""
+    """Hand the Trainer one approved hypothesis at a time, in priority order."""
 
     def planner_select_hypothesis_node(state: CampaignState) -> dict:
         contract = state.get("evaluation_contract")
@@ -27,8 +86,9 @@ def make_planner_select_hypothesis_node(deps: NodeDeps) -> Callable[[CampaignSta
         budget: ExperimentBudget = state.get("budget") or ExperimentBudget()
 
         if not hypotheses:
-            backlog = deps.planner_agent.propose_hypotheses(spec, contract, history)
-            hypotheses = sorted(backlog.hypotheses, key=lambda h: (h.priority, -h.confidence))
+            raise ContractViolation(
+                "No hypothesis backlog to select from; the backlog checkpoint never ran."
+            )
 
         update: dict = {
             "stage": Stage.PLANNING.value,

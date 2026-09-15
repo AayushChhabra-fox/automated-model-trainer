@@ -292,6 +292,10 @@ class CannedResponder:
     # --- Stage 3 -----------------------------------------------------------------
     def _backlog(self, text: str) -> HypothesisBacklog:
         self._bump("backlog")
+        rationale = "Highest expected value per compute minute first."
+        feedback = _extract_section(text, "human_feedback")
+        if feedback and feedback != "null":
+            rationale = f"{rationale} Revised after human feedback: {feedback}"
         hypotheses = [
             Hypothesis(
                 hypothesis_id=f"hyp-{i + 1}",
@@ -311,10 +315,7 @@ class CannedResponder:
             )
             for i in range(self.n_hypotheses)
         ]
-        return HypothesisBacklog(
-            hypotheses=hypotheses,
-            prioritization_rationale="Highest expected value per compute minute first.",
-        )
+        return HypothesisBacklog(hypotheses=hypotheses, prioritization_rationale=rationale)
 
     def _plan(self, text: str) -> ExperimentPlan:
         self._bump("plan")
