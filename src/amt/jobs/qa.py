@@ -34,7 +34,12 @@ from amt.jobs.eval import paired as paired_mod
 from amt.jobs.eval.harness import HARNESS_VERSION, evaluate
 from amt.jobs.eval.paired import paired_comparison
 from amt.jobs.models.registry import recommend_with_pyfunc
-from amt.jobs.train import REPRO_PREFIX, assert_contract, contract_eval_settings
+from amt.jobs.train import (
+    REPRO_PREFIX,
+    assert_contract,
+    cohorts_for,
+    contract_eval_settings,
+)
 
 __all__ = [
     "PHASE0_SPLITS",
@@ -335,7 +340,7 @@ def phase1(
 
     paired = paired_comparison(cand_per_user, base_per_user)
 
-    assignments = cohort_mod.assign_cohorts(frame.histories, frame.days_since_last)
+    assignments = cohorts_for(frame)
     cohort_candidate = cohort_mod.cohort_metrics(cand_per_user, assignments)
     cohort_baseline = cohort_mod.cohort_metrics(base_per_user, assignments)
     cohort_out: dict[str, dict[str, float]] = {}

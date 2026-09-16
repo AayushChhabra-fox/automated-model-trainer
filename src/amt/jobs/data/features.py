@@ -169,6 +169,12 @@ class EvalFrame:
     #: When the unit happened, for the daily slices the proxy-sanity check
     #: correlates against the product metric's own daily series.
     timestamps: list[Any] | None = None
+    #: Cohort labels per unit, keyed by dimension, read off the columns
+    #: materialization carried onto the row. In `next_item` mode cohorts are
+    #: derived from history length and recency; a render has neither, so the
+    #: only honest cohorts are the ones the contract named and the split
+    #: actually carries.
+    cohorts: dict[str, list[Any]] | None = None
 
     def __len__(self) -> int:
         return len(self.user_ids)
@@ -255,6 +261,19 @@ POSITIONS_COLUMN = "positions"
 LABELS_COLUMN = "labels"
 WEIGHTS_COLUMN = "weights"
 
+#: Everything a grouped split carries that is *not* a cohort dimension.
+_GROUPED_COLUMNS = frozenset(
+    {
+        GROUP_ID_COLUMN,
+        CANDIDATES_COLUMN,
+        POSITIONS_COLUMN,
+        LABELS_COLUMN,
+        WEIGHTS_COLUMN,
+        "user_id",
+        "ts",
+    }
+)
+
 
 def _grouped_eval_frame(frame, unit_ids: list[Any], index: ItemIndex | None) -> EvalFrame:
     """One render per row: candidates, the incumbent's order, and the labels."""
@@ -307,6 +326,12 @@ def _grouped_eval_frame(frame, unit_ids: list[Any], index: ItemIndex | None) -> 
         positions=positions,
         gains=gains if weights is not None else None,
         timestamps=frame["ts"].tolist() if "ts" in frame.columns else None,
+        cohorts={
+            column: [str(v) for v in frame[column].tolist()]
+            for column in frame.columns
+            if column not in _GROUPED_COLUMNS
+        }
+        or None,
     )
 
 

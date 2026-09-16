@@ -508,10 +508,17 @@ def _baseline_config(spec: Any) -> dict:
     the schema: the jobs side reads ``model.family``, the orchestrator side
     validates the whole dict.
     """
+    from amt.jobs.models.registry import FAMILIES
+
     baseline = getattr(spec, "baseline", None)
-    # BaselineDefinition names the model family in ``kind``.
+    # BaselineDefinition names the model family in ``kind``. Checked against
+    # the registry rather than a hardcoded pair: a whitelist of families is one
+    # more thing to forget, and forgetting it here is silent -- `logged_order`
+    # fell through to `popularity` and scored the wrong baseline for a
+    # grouped-rerank campaign, which is a comparison against a model nobody
+    # asked about.
     kind = str(getattr(baseline, "kind", "") or "popularity")
-    family = kind if kind in {"popularity", "sasrec"} else "popularity"
+    family = kind if kind in FAMILIES else "popularity"
     return {
         "family": family,
         "model": {"family": family},

@@ -65,11 +65,42 @@ def assert_contract(
     return str(contract_hash)
 
 
+def contract_ks(contract: Mapping[str, Any]) -> tuple[int, ...]:
+    """The cutoffs the contract's own metrics name, e.g. ``ndcg@4`` -> ``4``.
+
+    Previously the job fell back to 5/10/20 whenever ``metrics`` was a list --
+    which it always is, because the contract declares ``list[MetricDef]``. A
+    campaign whose primary metric is ``ndcg@4`` then never computed ``ndcg@4``
+    at all: champion selection had nothing to select on, and every number in
+    the run was at a cutoff nobody asked for. On a rail with three and a half
+    candidates per render, ``@10`` is also trivially 1.0, so the fallback was
+    not merely wrong but flattering.
+    """
+    metrics = contract.get("metrics")
+    # A dry run may override with `{"ks": [...]}`; a real contract carries a
+    # list of MetricDef and the cutoffs have to be read out of their names.
+    explicit = metrics.get("ks") if isinstance(metrics, Mapping) else contract.get("ks")
+    if explicit:
+        return tuple(sorted({int(k) for k in explicit}))
+
+    found: set[int] = set()
+    for metric in metrics if isinstance(metrics, Sequence) else ():
+        name = str((metric or {}).get("name") if isinstance(metric, Mapping) else metric or "")
+        _family, _, cutoff = name.partition("@")
+        if cutoff.isdigit():
+            found.add(int(cutoff))
+    primary = str(contract.get("primary_metric") or "")
+    _family, _, cutoff = primary.partition("@")
+    if cutoff.isdigit():
+        found.add(int(cutoff))
+    return tuple(sorted(found)) or DEFAULT_KS
+
+
 def contract_eval_settings(contract: Mapping[str, Any]) -> dict[str, Any]:
     """ks / primary metric / tolerance, wherever the contract records them."""
     metrics = contract.get("metrics")
     block = metrics if isinstance(metrics, Mapping) else {}
-    ks = block.get("ks") or contract.get("ks") or DEFAULT_KS
+    ks = contract_ks(contract)
     primary = (
         block.get("primary_metric")
         or contract.get("primary_metric")
@@ -259,10 +290,8 @@ def train_and_evaluate(
     family = str(model_cfg.get("family") or config.get("family") or "popularity")
     item_col = str(config.get("item_col", "item_id"))
 
-    index = build_item_index(
-        train_df,
-        item_col=item_col,
-        min_count=int(config.get("min_item_count", 1)),
+    index = _item_index(
+        train_df, item_col, int(config.get("min_item_count", 1))
     )
     val_frame = build_eval_frame(val_df)
     extra_frames = _recipe_attribute_frames(contract, config, item_col, spark)
@@ -310,10 +339,7 @@ def train_and_evaluate(
             val_metrics[f"{REPRO_PREFIX}{key}"] = value
     val_metrics[f"{REPRO_PREFIX}n_users"] = float(subset)
 
-    assignments = cohort_mod.assign_cohorts(
-        val_frame.histories, val_frame.days_since_last
-    )
-    cohort_metrics = cohort_mod.cohort_metrics(val_per_user, assignments)
+    cohort_metrics = cohort_mod.cohort_metrics(val_per_user, cohorts_for(val_frame))
 
     train_metrics = _train_metrics(model, train_df, index)
 
@@ -380,15 +406,68 @@ def train_and_evaluate(
     }
 
 
+def _item_index(train_df, item_col: str, min_count: int):
+    """The catalog `coverage@k` divides by, in whichever grain the split is.
+
+    A render-grain split has no item column: its catalog is the set of titles
+    the rail actually impressed, which is also the only set a re-ranker could
+    ever surface.
+    """
+    import pandas as pd
+
+    from amt.jobs.data.features import CANDIDATES_COLUMN, as_item_list
+
+    frame = train_df
+    if CANDIDATES_COLUMN in getattr(train_df, "columns", ()):
+        frame = pd.DataFrame(
+            {
+                item_col: [
+                    item
+                    for row in train_df[CANDIDATES_COLUMN]
+                    for item in as_item_list(row)
+                ]
+            }
+        )
+    return build_item_index(frame, item_col=item_col, min_count=min_count)
+
+
+def cohorts_for(frame) -> dict[str, list[str]]:
+    """The reported slices for a frame, in whichever grain it is.
+
+    ``next_item`` derives them from history length and recency. A render has
+    neither -- its "history" is the candidate set -- so a grouped frame reports
+    the dimensions the contract named and materialization carried onto the row,
+    and reports nothing if it carries none. Inventing a history-length cohort
+    from a candidate count would be a number that looks like evidence.
+    """
+    if frame.grouped:
+        return {k: [str(v) for v in labels] for k, labels in (frame.cohorts or {}).items()}
+    return cohort_mod.assign_cohorts(frame.histories, frame.days_since_last)
+
+
 def _slice_frame(frame, n: int):
+    """The first ``n`` units, with every parallel array kept aligned."""
     from amt.jobs.data.features import EvalFrame
+
+    def head(values):
+        return values[:n] if values is not None else None
 
     return EvalFrame(
         user_ids=frame.user_ids[:n],
         histories=frame.histories[:n],
         truths=frame.truths[:n],
-        days_since_last=(
-            frame.days_since_last[:n] if frame.days_since_last is not None else None
+        days_since_last=head(frame.days_since_last),
+        # Dropping these silently re-scored the reproduction subset in
+        # `next_item` mode: no candidates, no weights, different numbers, and
+        # QA phase 0 then failing to reproduce its own logged validation.
+        candidates=head(frame.candidates),
+        positions=head(frame.positions),
+        gains=head(frame.gains),
+        timestamps=head(frame.timestamps),
+        cohorts=(
+            {k: v[:n] for k, v in frame.cohorts.items()}
+            if frame.cohorts is not None
+            else None
         ),
     )
 

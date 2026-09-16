@@ -272,6 +272,44 @@ def test_no_weighting_means_no_weights_column(tmp_path):
     assert "weights" not in _split(tmp_path, "split_train").columns
 
 
+def test_the_cutoffs_come_from_the_contracts_own_metrics():
+    """`ndcg@4` must actually compute `ndcg@4`.
+
+    The job used to fall back to 5/10/20 whenever `metrics` was a list -- which
+    it always is -- so a campaign's primary metric was never computed and
+    champion selection had nothing to select on. On a rail with 3.5 candidates
+    per render, `@10` is also trivially 1.0.
+    """
+    from amt.jobs.train import contract_ks
+
+    assert contract_ks(
+        {
+            "metrics": [{"name": "ndcg@4"}, {"name": "hitrate@1"}, {"name": "auc"}],
+            "primary_metric": "ndcg@4",
+        }
+    ) == (1, 4)
+
+
+def test_a_cutoff_only_the_primary_metric_names_is_still_computed():
+    from amt.jobs.train import contract_ks
+
+    assert contract_ks({"metrics": [{"name": "auc"}], "primary_metric": "mrr@7"}) == (7,)
+
+
+def test_a_contract_naming_no_cutoffs_keeps_the_harness_defaults():
+    from amt.jobs.eval.harness import DEFAULT_KS
+    from amt.jobs.train import contract_ks
+
+    assert contract_ks({"metrics": [{"name": "auc"}]}) == DEFAULT_KS
+
+
+def test_a_dry_run_can_still_override_the_cutoffs():
+    from amt.jobs.train import contract_ks
+
+    assert contract_ks({"metrics": {"ks": [2, 3]}}) == (2, 3)
+    assert contract_ks({"ks": [9]}) == (9,)
+
+
 def test_the_generated_sql_matches_a_boolean_positive_value_case_insensitively():
     """Python writes `True`; Spark reads `true`. The mismatch cost two cluster runs.
 
