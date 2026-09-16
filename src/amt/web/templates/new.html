@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}new campaign{% endblock %}
+{% block subtitle %}HC1 — the problem, in your words{% endblock %}
+{% block body %}
+
+{% if error %}<div class="card bad">{{ error }}</div>{% endif %}
+
+<form method="post" action="{{ url_for('create') }}">
+  <div class="card">
+    <p>
+      <label>campaign id<br>
+        <input type="text" name="campaign_id" placeholder="fyl-ctv-rerank-2026q3" required>
+      </label>
+    </p>
+    <p>
+      <label>the problem, in plain language<br>
+        <textarea name="problem" required
+          placeholder="Does a re-ranker beat the incumbent order of the For You rail on its own conversion metric, over the last six weeks?"></textarea>
+      </label>
+    </p>
+    <p class="muted">
+      This is HC1. Everything the campaign does is derived from it, so it is worth
+      being specific about the container, the period and the metric that matters.
+    </p>
+    <p>
+      <label>iterations per hypothesis <input type="text" name="max_iterations" value="6" size="4"></label>
+      &nbsp;
+      <label>hypotheses <input type="text" name="max_hypotheses" value="3" size="4"></label>
+      &nbsp;
+      <label>compute minutes <input type="text" name="max_compute_minutes" value="240" size="6"></label>
+    </p>
+    <button class="primary" type="submit">start, and stop at HC2</button>
+  </div>
+</form>
+
+{% endblock %}

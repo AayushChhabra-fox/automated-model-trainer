@@ -228,6 +228,9 @@ jobs = [
     { name = "xgboost", version = "3.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "xgboost", version = "3.4.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
+web = [
+    { name = "flask" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -239,6 +242,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "databricks-sdk", specifier = ">=0.30.0" },
+    { name = "flask", marker = "extra == 'web'", specifier = ">=3.0" },
     { name = "langchain-anthropic", specifier = ">=0.2.0" },
     { name = "langchain-core", specifier = ">=0.3.0" },
     { name = "langchain-openai", specifier = ">=0.2.0" },
@@ -257,7 +261,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12" },
     { name = "xgboost", marker = "extra == 'jobs'", specifier = ">=2.0" },
 ]
-provides-extras = ["jobs"]
+provides-extras = ["jobs", "web"]
 
 [package.metadata.requires-dev]
 dev = [

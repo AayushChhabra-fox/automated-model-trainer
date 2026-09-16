@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}AMT campaigns{% endblock %}
+{% block subtitle %}every campaign in the local checkpoint database{% endblock %}
+{% block body %}
+
+{% if not campaigns %}
+  <div class="card">
+    <p>No campaigns yet. <a href="{{ url_for('new_form') }}">Start one</a>, or run
+    <code>amt doctor</code> first to check this machine can reach Databricks at all.</p>
+  </div>
+{% else %}
+<table>
+  <tr><th>campaign</th><th>stage</th><th>status</th><th>waiting on</th></tr>
+  {% for campaign in campaigns %}
+  <tr>
+    <td><a href="{{ url_for('campaign', campaign_id=campaign.id) }}">{{ campaign.id }}</a></td>
+    <td>{{ campaign.stage }}</td>
+    <td>
+      {{ campaign.status }}
+      {% if campaign.running %}<span class="pill">running</span>{% endif %}
+    </td>
+    <td>{% if campaign.awaiting %}<strong>{{ campaign.awaiting }}</strong>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% endblock %}

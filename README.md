@@ -31,6 +31,25 @@ Reject with feedback to re-run a stage:
 uv run amt reject demo -m "use a 30-day label window" --mock
 ```
 
+`amt run demo --mock` is the same thing as one interactive session.
+
+## The browser surface
+
+```bash
+uv sync --extra web
+uv run amt web            # http://127.0.0.1:8765
+```
+
+Same graph, same checkpointer, same decisions: the campaign page renders the pending
+checkpoint with its verbs, a progress log of every node as it completes (including the
+Databricks run URL), the hypothesis table and the experimentation report. The CLI stays
+for scripting and `--mock`.
+
+**No authentication, by design.** It runs on your machine as you, with your `.env`, and
+binds to `127.0.0.1`. One operator, one process. Multi-user or hosted deployment is out
+of scope — there is no tenancy, no authorization and no audit of who answered a
+checkpoint, so do not put it behind a public address.
+
 ## Human checkpoints
 
 | HC | Where | CLI |
@@ -39,13 +58,19 @@ uv run amt reject demo -m "use a 30-day label window" --mock
 | 2 | ProblemSpec approval | `amt approve` / `amt reject -m ...` |
 | 3 | EvaluationContract approval | `amt approve` / `amt reject -m ...` |
 | — | hypothesis backlog (`HC_BACKLOG`) | `amt approve` / `amt reject -m ...` |
-| — | feature/fit shape of a booster family (`HC_FEATURE`) | `amt approve` / `amt reject -m ...` |
+| — | every booster's feature/fit shape, at once (`HC_FEATURE`) | `amt approve [--keep/--drop]` |
+| — | each hypothesis champion (`HC_CHAMPION`) | `amt approve [--freeze]` |
 | 4 | scientific conclusion & promotion | `amt report`, `amt promote` |
 
-The four numbered checkpoints are the ones SPEC.md requires. `HC_BACKLOG` and `HC_FEATURE` are
-additions: the first decides which hypotheses spend the budget, the second decides what a
-booster model is allowed to see. Everything else between HC3 and HC4 runs autonomously inside
-the agreed experiment budget.
+The four numbered checkpoints are the ones SPEC.md requires. The other three are additions:
+`HC_BACKLOG` decides which hypotheses spend the budget, `HC_FEATURE` decides what every
+booster model is allowed to see (all shapes in one review, not one gate per hypothesis), and
+`HC_CHAMPION` shows each hypothesis's champion against the incumbent before the next
+hypothesis runs. The Trainer loop *inside* a hypothesis stays autonomous, which is the point
+of the band between HC3 and HC4.
+
+At the three checklist gates `--keep`/`--drop` edit the list in place; rejecting costs a round
+trip through the agent, so it is for "redraft this", not "not that one".
 
 ## Layout
 

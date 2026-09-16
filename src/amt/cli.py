@@ -436,6 +436,38 @@ def config() -> None:
 
 
 @app.command()
+def web(
+    host: str = typer.Option("127.0.0.1", help="Bind address. Localhost by design."),
+    port: int = typer.Option(8765, help="Port."),
+    mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
+    gate_champions: bool = typer.Option(
+        True, "--gate-champions/--no-gate-champions", help="Review each hypothesis champion."
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Flask debug mode."),
+) -> None:
+    """Serve the campaign surface in a browser, with the CLI as the fallback.
+
+    Same graph, same checkpointer, same decisions — what a browser adds is
+    somewhere for the twenty minutes between answering a checkpoint and
+    reaching the next one to go. No auth: this runs as you, on your machine,
+    bound to localhost.
+    """
+    try:
+        from amt.web.app import create_app
+    except ImportError:
+        console.print(
+            "[red]the web surface needs the `web` extra[/red] — "
+            "`uv sync --extra web`, then try again."
+        )
+        raise typer.Exit(code=1) from None
+
+    console.print(f"[green]amt[/green] http://{host}:{port}")
+    create_app(mock=mock, gate_champions=gate_champions).run(
+        host=host, port=port, debug=debug, threaded=True
+    )
+
+
+@app.command()
 def doctor(
     tables: str = typer.Option(
         "", "--tables", help="Comma-separated tables the campaign must be able to read."

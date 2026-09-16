@@ -1,0 +1,58 @@
+{#
+  One stylesheet, inline, no CDN and no JS. The campaign page opts into a
+  five-second meta refresh only while a runner is live, so a page showing a
+  pending checkpoint never reloads under the operator's cursor.
+#}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+{% if running %}<meta http-equiv="refresh" content="5">{% endif %}
+<title>{% block title %}AMT{% endblock %}</title>
+<style>
+  body { font: 15px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif;
+         max-width: 62rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; color: #1a1a1a; }
+  a { color: #1a5fb4; }
+  header { display: flex; align-items: baseline; gap: 1rem; border-bottom: 1px solid #e3e3e3;
+           padding-bottom: .6rem; margin-bottom: 1.5rem; }
+  header h1 { font-size: 1.15rem; margin: 0; }
+  header .spacer { flex: 1; }
+  h2 { font-size: .95rem; margin: 1.8rem 0 .5rem; text-transform: uppercase;
+       letter-spacing: .06em; color: #555; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+  th, td { text-align: left; padding: .35rem .55rem; border-bottom: 1px solid #ededed;
+           vertical-align: top; }
+  th { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: #555; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  pre { background: #f7f7f7; padding: .8rem; border-radius: 4px; overflow-x: auto;
+        font-size: 12.5px; line-height: 1.45; max-height: 32rem; }
+  code { background: #f4f4f4; padding: .1rem .3rem; border-radius: 3px; }
+  .card { border: 1px solid #e3e3e3; border-radius: 5px; padding: 1rem 1.15rem; margin: 1rem 0; }
+  .gate { border-left: 4px solid #b08a30; background: #fdf9ef; }
+  .live { border-left: 4px solid #1a5fb4; background: #f2f6fc; }
+  .bad { border-left: 4px solid #b03030; background: #fdeeee; }
+  .muted { color: #777; font-size: .9rem; }
+  form.verbs { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+               margin-top: .8rem; }
+  input[type=text], textarea { font: inherit; padding: .35rem .5rem; border: 1px solid #ccc;
+                               border-radius: 4px; }
+  input[type=text] { min-width: 12rem; }
+  textarea { width: 100%; min-height: 4rem; }
+  button { font: inherit; padding: .35rem .9rem; border: 1px solid #bbb; border-radius: 4px;
+           background: #fafafa; cursor: pointer; }
+  button.primary { background: #1a5fb4; border-color: #1a5fb4; color: #fff; }
+  .log { font-variant-numeric: tabular-nums; font-size: 13px; }
+  .log .clock { color: #888; }
+  .log .error { color: #b03030; }
+  .pill { font-size: .78rem; padding: .1rem .45rem; border-radius: 10px; background: #eee; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="{{ url_for('index') }}">AMT</a></h1>
+  <span class="muted">{% block subtitle %}{% endblock %}</span>
+  <span class="spacer"></span>
+  <a href="{{ url_for('new_form') }}">new campaign</a>
+</header>
+{% block body %}{% endblock %}
+</body>
+</html>

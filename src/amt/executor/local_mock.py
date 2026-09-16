@@ -299,6 +299,16 @@ class LocalMockExecutor:
             ]
 
         mean_delta = candidate - baseline
+        # Keep the fixture self-consistent: a CI that does not bracket its own
+        # mean would make every downstream assertion about significance a
+        # coincidence, and would read as a bug in the report.
+        width = max(abs(ci[1] - ci[0]) / 2.0, 1e-6)
+        if ci[0] > 0:  # a significant improvement stays strictly above zero
+            ci = (max(mean_delta - width, 1e-6), mean_delta + width)
+        elif ci[1] < 0:  # a significant regression stays strictly below zero
+            ci = (mean_delta - width, min(mean_delta + width, -1e-6))
+        else:  # inconclusive: the interval must straddle zero
+            ci = (min(mean_delta - width, -1e-6), max(mean_delta + width, 1e-6))
         primary = PairedDelta(
             metric=metric,
             baseline_value=baseline,

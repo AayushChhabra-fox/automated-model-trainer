@@ -29,6 +29,11 @@ jobs = [
     "xgboost>=2.0",
     "lightgbm>=4.3",
 ]
+# The local operator surface. Jinja2 arrives with Flask, which is also what
+# renders the experimentation report, so this is one dependency for two uses.
+web = [
+    "flask>=3.0",
+]
 
 [project.scripts]
 amt = "amt.cli:app"

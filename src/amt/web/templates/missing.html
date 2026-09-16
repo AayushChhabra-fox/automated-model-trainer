@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}not found{% endblock %}
+{% block body %}
+<div class="card">
+  <p>Nothing here for <code>{{ campaign_id }}</code>.</p>
+  <p class="muted">
+    Either the campaign does not exist in this checkpoint database, or it has not
+    reached the stage that produces this page. <code>amt list</code> names what is here.
+  </p>
+</div>
+{% endblock %}

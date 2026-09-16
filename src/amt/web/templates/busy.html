@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}already running{% endblock %}
+{% block body %}
+<div class="card live">
+  <p><strong>{{ campaign_id }} is already running.</strong></p>
+  <p class="muted">
+    {{ detail }}. Two threads resuming one campaign would interleave writes to the
+    same checkpoint, so the second is refused rather than raced.
+  </p>
+  <p><a href="{{ url_for('campaign', campaign_id=campaign_id) }}">back to the campaign</a></p>
+</div>
+{% endblock %}
