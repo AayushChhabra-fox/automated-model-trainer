@@ -482,7 +482,12 @@ GROUPED_RECIPE = {
 
 
 def _rendered(n_groups: int = 6) -> pd.DataFrame:
-    """Render-grain rows: three candidates each, the conversion rotating slots."""
+    """Render-grain rows: three candidates each, the conversion rotating slots.
+
+    Exactly the columns materialization writes -- and therefore *no* ``item_id``
+    column. The first real campaign died on ``KeyError: 'item_id'`` because an
+    earlier version of this fixture carried one and hid the assumption.
+    """
     rows = []
     for g in range(n_groups):
         items = [f"i{(g + j) % 5}" for j in range(3)]
@@ -494,10 +499,22 @@ def _rendered(n_groups: int = 6) -> pd.DataFrame:
                 "candidates": items,
                 "positions": [0.0, 1.0, 2.0],
                 "labels": labels,
-                "item_id": items[0],
+                "user_id": f"u{g}",
+                "ts": g,
             }
         )
     return pd.DataFrame(rows)
+
+
+def test_a_grouped_split_has_no_item_column_and_the_state_is_built_from_candidates():
+    from amt.jobs.models import tabular_common
+
+    frame = _rendered(6)
+    assert "item_id" not in frame.columns
+    state = tabular_common.build_state(GROUPED_RECIPE, frame, "item_id")
+    assert set(state.catalog) == {f"i{k}" for k in range(5)}
+    # i0..i4 each appear in 18 candidate slots spread over 5 titles
+    assert sum(state.counts.values()) == 18.0, "a count is an impression"
 
 
 def test_a_grouped_fit_uses_the_impressed_candidates_and_samples_no_negatives(stub_backend):
@@ -567,3 +584,38 @@ def test_the_harness_reports_nan_free_totals_for_grouped_units():
     assert scored["n_users"] == 2.0
     assert scored["n_scored"] == 1.0
     assert not np.isnan(scored["ndcg@1"])
+
+
+def test_an_attribute_source_is_read_under_the_contracts_item_column():
+    """The split says ``item_id``; ``pr_item_feature`` says ``entity_id``. Bridge them."""
+    from amt.jobs import train as train_mod
+
+    class _Spark:
+        def __init__(self) -> None:
+            self.sql_text = ""
+
+        def sql(self, text: str):
+            self.sql_text = text
+            return pd.DataFrame({"item_id": ["i0"], "content_type": ["news"]})
+
+    spark = _Spark()
+    contract = {
+        "dataset": {"columns": {"user": "account_id", "item": "entity_id", "timestamp": "ts"}},
+        "qa_split": {"table": "cat.sch.qa"},
+    }
+    config = {
+        "feature_recipe": {
+            "sources": [
+                {
+                    "name": "traits",
+                    "table": "pnr_prod.silver.pr_item_feature",
+                    "columns": ["entity_id", "content_type"],
+                }
+            ]
+        }
+    }
+    frames = train_mod._recipe_attribute_frames(contract, config, "item_id", spark)
+
+    assert "entity_id AS item_id" in spark.sql_text
+    assert spark.sql_text.count("entity_id") == 1, "the key is not selected twice"
+    assert list(frames["traits"].columns) == ["item_id", "content_type"]

@@ -174,10 +174,13 @@ def _recipe_attribute_frames(
                 "but this job has no Spark session"
             )
         # Attribute sources attach at the item grain; the recipe no longer
-        # declares join keys because nothing else was ever supported.
-        keys = [item_col]
-        columns = [str(c) for c in (source.get("columns") or [])]
-        wanted = ", ".join(dict.fromkeys([*keys, *columns]))
+        # declares join keys because nothing else was ever supported. The source
+        # is keyed by the contract's item column and read under the split's
+        # generic name so `_attribute_table` can join the two.
+        source_key = _source_item_column(contract, item_col)
+        columns = [str(c) for c in (source.get("columns") or []) if str(c) != source_key]
+        key_expr = source_key if source_key == item_col else f"{source_key} AS {item_col}"
+        wanted = ", ".join(dict.fromkeys([key_expr, *columns]))
         frames[str(source.get("name") or table)] = to_pandas(
             spark.sql(f"SELECT DISTINCT {wanted} FROM {table}")
         )
@@ -404,6 +407,17 @@ def train_and_evaluate(
         "primary_metric": settings["primary_metric"],
         "splits_read": guard.reads,
     }
+
+
+def _source_item_column(contract: Mapping[str, Any], item_col: str) -> str:
+    """The item column *as the source tables name it* (``entity_id`` for FYL/LFY).
+
+    Materialization renames every split's item column to the generic
+    ``item_id``, so ``item_col`` is right for the splits; an attribute source is
+    still keyed by the contract's own name and has to be read under that.
+    """
+    columns = (contract.get("dataset") or {}).get("columns") or {}
+    return str(columns.get("item") or item_col)
 
 
 def _item_index(train_df, item_col: str, min_count: int):

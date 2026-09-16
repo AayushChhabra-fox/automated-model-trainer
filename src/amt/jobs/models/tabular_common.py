@@ -780,6 +780,21 @@ def load(path: str) -> TabularModel:
 
 
 def _item_stats(train_df, item_col: str) -> tuple[list[Any], dict[str, float], dict[str, int]]:
+    """Catalog, impression counts and popularity ranks from the train split.
+
+    A render-grain split has no item column: its items are the ``candidates``
+    arrays, so they are exploded first and a count is an impression, not an
+    interaction. (These feed ``item_train_count`` / ``item_train_rank``; a
+    contract that bans title identity simply never references them.)
+    """
+    from amt.jobs.data.features import CANDIDATES_COLUMN, as_item_list
+
+    if item_col not in train_df.columns and CANDIDATES_COLUMN in train_df.columns:
+        import pandas as pd
+
+        train_df = pd.DataFrame(
+            {item_col: [i for row in train_df[CANDIDATES_COLUMN] for i in as_item_list(row)]}
+        )
     counts = train_df[item_col].value_counts()
     ordered = sorted(counts.index.tolist(), key=lambda i: (-int(counts[i]), str(i)))
     return (
