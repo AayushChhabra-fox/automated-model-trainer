@@ -168,6 +168,19 @@ def _render_checkpoint(payload: dict) -> tuple[str, bool]:
     return monitor.clip(json.dumps(checkpoint_document(payload), indent=2, default=str))
 
 
+def _jsonable(value: Any) -> Any:
+    """State values are Pydantic models, dicts/lists of them, or plain data."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if hasattr(value, "value") and not isinstance(value, (str, int, float)):
+        return value.value  # enums
+    return value
+
+
 #: Columns worth a terminal column at each checkpoint. `title` is prose and
 #: belongs in the JSON below the table, not squeezed into a cell.
 _HIDDEN_COLUMNS = {"HC_BACKLOG": ("title", "note")}
@@ -687,16 +700,37 @@ def show(
     probes: bool = typer.Option(
         False, "--probes", help="Keep the raw probe rows (large; omitted by default)."
     ),
+    key: str = typer.Option(
+        "",
+        "--key",
+        "-k",
+        help=(
+            "Print one campaign-state field instead of the pending checkpoint, e.g. "
+            "approved_shapes, experiment_plan, evaluation_contract, hypotheses, "
+            "experiment_history, frozen_champion. An already-approved gate lives here."
+        ),
+    ),
     mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
 ) -> None:
-    """Print the checkpoint document in full — the panel at a checkpoint is only a preview."""
+    """Print the checkpoint document in full — the panel at a checkpoint is only a preview.
+
+    Once a gate is approved its document is no longer pending; `--key` reads it
+    back from state (`--key approved_shapes` for the recipes approved at HC_FEATURE).
+    """
     graph = _build(mock, campaign)
     state = _state(graph, campaign)
     if not state:
         console.print(f"[red]No campaign named {campaign!r}.[/red]")
         raise typer.Exit(code=1)
     payload = _pending_interrupt(graph, campaign)
-    if payload is None:
+    if key:
+        if key not in state:
+            console.print(
+                f"[red]No state field {key!r}.[/red] Fields: {', '.join(sorted(state))}"
+            )
+            raise typer.Exit(code=1)
+        document = _jsonable(state[key])
+    elif payload is None:
         console.print("[yellow]No pending checkpoint; showing the latest ProblemSpec.[/yellow]")
         spec = state.get("problem_spec")
         if spec is None:
