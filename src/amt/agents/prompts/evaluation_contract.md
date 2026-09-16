@@ -42,6 +42,46 @@ name objects and columns that exist:
 
 Leave every split's `table` empty: materialization names the output tables.
 
+## When `evaluation_mode` is `grouped_rerank`
+
+Carry the mode over from the ProblemSpec — never change it here, because it decides what
+question the campaign answers. That mode makes four more `dataset` fields executable, and
+materialization refuses to run without them:
+
+- `dataset.group_key` — the columns that together identify **one render**. Every impressed
+  row sharing these values is one evaluation unit. Getting this too coarse merges separate
+  renders into one; too fine splits one render into singletons that are then dropped.
+- `dataset.position_column` — the column holding the slot the incumbent showed each item
+  in. This is the baseline's ranking.
+- `dataset.label_column` and `dataset.label_positive_values` — the column marking a
+  converted impression, and which of its values count. This is the label, so it is frozen
+  here as ground truth: a `FeatureRecipe` may choose what a model *trains* on, never what
+  counts as a conversion. For a boolean column, `[true]`.
+
+Also set:
+
+- `relevance_weighting` — `pbm` whenever the surface has a strong position effect, which is
+  almost always true of a ranked rail. Unweighted, a conversion at the focused slot counts
+  the same as one the user had to scroll to, so any ranker that copies the logged order
+  scores near-perfectly and every change reads as a regression. Under `pbm`,
+  materialization estimates each slot's examination propensity from the **train** split and
+  a conversion counts `1/theta`. Use `none` only if you can say why position does not
+  matter here.
+- `product_metric_source` — the table, date column, value column and filter for the daily
+  series of the product number this campaign claims to move. QA correlates the
+  *incumbent's* offline metric against it day by day, and returns `SPEC_REVIEW` if they do
+  not track each other: a metric that does not move with the product number for the model
+  already in production cannot certify a replacement. Prefer a series built from a
+  different source than the label, because then the check is real rather than circular. If
+  no such series exists, leave it unset and say so in `acceptance_criteria.notes`.
+- `acceptance_criteria.min_proxy_correlation` / `min_proxy_days` — the bar that check has
+  to clear. The default needs 7 overlapping days, so make sure the QA window has them.
+
+Sampling, if the volume needs it, goes in `dataset.filters` as a deterministic hash
+predicate (`abs(hash(<key>)) % 10 = 0`) so the population is frozen with the contract and
+cannot drift between runs. Sample on the session or user key, never on the row, or one
+render arrives split across two splits.
+
 `dataset.snapshot_id` and `dataset.dataset_version` are required and rejected when blank.
 They are not executed, but without them nobody can say which state of `source_table`
 produced the splits. Name what the investigation actually established — the table's Delta
