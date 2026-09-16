@@ -6,7 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from amt.schemas.common import ExperimentBudget, MetricDef, SplitRef
-from amt.schemas.evaluation_contract import EvaluationContract, SplitPolicy
+from amt.schemas.evaluation_contract import (
+    DatasetDefinition,
+    EvaluationContract,
+    SplitPolicy,
+)
 from amt.schemas.hypothesis import Hypothesis
 from amt.schemas.qa import PairedDelta, Phase0Result, QADecision
 from amt.schemas.run_result import TrainingRunResult
@@ -67,6 +71,26 @@ def test_contract_rejects_metrics_the_harness_cannot_compute(evaluation_contract
     payload["metrics"].append({"name": "IPS-NDCG@10", "definition": "Position-corrected NDCG."})
     with pytest.raises(ValidationError, match="cannot compute"):
         EvaluationContract.model_validate(payload)
+
+
+@pytest.mark.parametrize("field", ["snapshot_id", "dataset_version"])
+def test_contract_rejects_a_dataset_without_an_immutable_source_reference(
+    evaluation_contract, field
+):
+    # `vod-nextitem-001` was approved with both of these blank, which left no way
+    # to say which state of the source table produced its splits.
+    payload = evaluation_contract.model_dump()
+    payload["dataset"][field] = "  "
+    with pytest.raises(ValidationError, match="immutable reference"):
+        EvaluationContract.model_validate(payload)
+
+
+def test_a_dataset_definition_cannot_omit_the_references_altogether():
+    with pytest.raises(ValidationError, match="Field required"):
+        DatasetDefinition(source_table="cat.sch.events")
+    assert DatasetDefinition(
+        source_table="cat.sch.events", snapshot_id="v12", dataset_version="12"
+    ).snapshot_id == "v12"
 
 
 def test_temporal_split_policy_without_boundaries_is_rejected():

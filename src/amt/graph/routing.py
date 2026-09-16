@@ -7,8 +7,12 @@ These rules are code, not prompts. An agent cannot talk its way past them:
 * a tabular booster never trains on a feature/fit shape a human has not approved;
 * every stage after HC3 asserts the frozen ``contract_hash``;
 * QA cannot run before champion freeze, and never with more than one champion;
-* Phase 0 may be retried at most :data:`PHASE0_MAX_ATTEMPTS` times;
+* Phase 0 may be retried at most ``settings.phase0_max_attempts`` times;
 * ``SPEC_REVIEW`` routes to the conclusion/human checkpoint, never back into training.
+
+Nothing here reads settings or the environment: every rule is a function of state, so a
+router can be unit-tested by writing the state that should trigger it. Caps that come from
+configuration are stamped into state by the node they govern.
 """
 
 from __future__ import annotations
@@ -18,9 +22,6 @@ from amt.schemas.champion import FrozenChampion
 from amt.schemas.common import ExperimentBudget
 from amt.schemas.evaluation_contract import EvaluationContract
 from amt.schemas.feature_recipe import is_tabular_family
-from amt.schemas.qa import QADecision
-
-PHASE0_MAX_ATTEMPTS = 3
 
 
 class ContractViolation(RuntimeError):
@@ -183,6 +184,23 @@ def route_after_trainer_interpret(state: CampaignState) -> str:
     return "trainer_propose" if should_continue else "select_hypothesis_champion"
 
 
+def phase0_max_attempts(state: CampaignState) -> int:
+    """The Phase 0 retry cap, as ``qa_phase0_node`` stamped it from settings.
+
+    Read from state rather than from ``settings`` so this module stays pure and
+    so a resumed campaign keeps the cap it started under -- editing
+    ``AMT_PHASE0_MAX_ATTEMPTS`` mid-campaign must not change how many repairs a
+    champion already part-way through QA is allowed.
+    """
+    cap = int(state.get("phase0_max_attempts", 0) or 0)
+    if cap < 1:
+        raise ContractViolation(
+            "phase0_max_attempts is not in state; qa_phase0 stamps it from "
+            "settings alongside the result this router reads."
+        )
+    return cap
+
+
 def route_after_qa_phase0(state: CampaignState) -> str:
     """Phase 0 gates Phase 1. Fixable defects may be retried up to the attempt cap."""
     result = state.get("qa_phase0")
@@ -191,16 +209,6 @@ def route_after_qa_phase0(state: CampaignState) -> str:
     if result.passed:
         return "qa_phase1"
     attempts = int(state.get("phase0_attempts", 0) or 0)
-    if result.fixable and attempts < PHASE0_MAX_ATTEMPTS:
+    if result.fixable and attempts < phase0_max_attempts(state):
         return "qa_phase0"
-    return "conclusion"
-
-
-def route_after_qa_decision(state: CampaignState) -> str:
-    """Every QA decision — PASS, FAIL_HYPOTHESIS, SPEC_REVIEW — ends at the conclusion (HC4)."""
-    decision = state.get("qa_decision")
-    if decision is None:
-        raise ContractViolation("qa_decision produced no decision.")
-    if decision not in set(QADecision):
-        raise ContractViolation(f"Unknown QA decision: {decision!r}")
     return "conclusion"

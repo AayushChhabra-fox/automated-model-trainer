@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from amt.graph.routing import (
-    PHASE0_MAX_ATTEMPTS,
     ContractViolation,
     assert_contract_hash,
     assert_not_frozen,
@@ -14,7 +13,6 @@ from amt.graph.routing import (
     route_after_hc_hypotheses,
     route_after_hc_problem_spec,
     route_after_planner_select,
-    route_after_qa_decision,
     route_after_qa_phase0,
     route_after_trainer_interpret,
     trainer_should_continue,
@@ -128,23 +126,33 @@ def test_qa_rejects_a_champion_from_another_contract(evaluation_contract, frozen
 
 def test_phase0_retries_only_fixable_defects_and_only_up_to_the_cap():
     fixable = Phase0Result(passed=False, fixable=True, decision=QADecision.INVALID_EXPERIMENT)
-    assert route_after_qa_phase0({"qa_phase0": fixable, "phase0_attempts": 1}) == "qa_phase0"
-    assert (
-        route_after_qa_phase0({"qa_phase0": fixable, "phase0_attempts": PHASE0_MAX_ATTEMPTS})
-        == "conclusion"
-    )
+    state = {"qa_phase0": fixable, "phase0_max_attempts": 3}
+    assert route_after_qa_phase0({**state, "phase0_attempts": 1}) == "qa_phase0"
+    assert route_after_qa_phase0({**state, "phase0_attempts": 3}) == "conclusion"
 
     unfixable = Phase0Result(passed=False, fixable=False, decision=QADecision.INVALID_EXPERIMENT)
-    assert route_after_qa_phase0({"qa_phase0": unfixable, "phase0_attempts": 1}) == "conclusion"
+    assert (
+        route_after_qa_phase0(
+            {"qa_phase0": unfixable, "phase0_attempts": 1, "phase0_max_attempts": 3}
+        )
+        == "conclusion"
+    )
 
     assert route_after_qa_phase0({"qa_phase0": Phase0Result(passed=True)}) == "qa_phase1"
 
 
-def test_every_qa_decision_ends_at_the_conclusion():
-    for decision in (QADecision.PASS, QADecision.FAIL_HYPOTHESIS, QADecision.SPEC_REVIEW):
-        assert route_after_qa_decision({"qa_decision": decision}) == "conclusion"
+def test_the_phase0_cap_is_the_configured_one_not_a_hardcoded_three():
+    """``AMT_PHASE0_MAX_ATTEMPTS`` used to be inert; the node stamps it into state."""
+    fixable = Phase0Result(passed=False, fixable=True, decision=QADecision.INVALID_EXPERIMENT)
+    state = {"qa_phase0": fixable, "phase0_attempts": 1, "phase0_max_attempts": 1}
+    assert route_after_qa_phase0(state) == "conclusion"
+    assert route_after_qa_phase0({**state, "phase0_max_attempts": 5}) == "qa_phase0"
+
+
+def test_a_failing_phase0_without_a_stamped_cap_is_a_violation():
+    fixable = Phase0Result(passed=False, fixable=True, decision=QADecision.INVALID_EXPERIMENT)
     with pytest.raises(ContractViolation):
-        route_after_qa_decision({})
+        route_after_qa_phase0({"qa_phase0": fixable, "phase0_attempts": 1})
 
 
 # --- feature/fit checkpoint (HC_FEATURE) ----------------------------------------------

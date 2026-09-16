@@ -85,12 +85,36 @@ class DatasetDefinition(AmtModel):
     source_tables: list[str] = Field(
         default_factory=list, description="Every upstream table the dataset derives from."
     )
-    snapshot_id: str = Field(default="", description="Immutable snapshot identifier.")
-    dataset_version: str = Field(default="", description="Delta version / materialization id.")
+    snapshot_id: str = Field(description="Immutable snapshot identifier.")
+    dataset_version: str = Field(description="Delta version / materialization id.")
     population_eligibility: str = ""
     temporal_range: TemporalRange | None = None
     exclusions: list[str] = Field(default_factory=list)
     label_construction: str = ""
+
+    @model_validator(mode="after")
+    def _require_immutable_source_reference(self) -> DatasetDefinition:
+        """A campaign whose source can move is not reproducible.
+
+        ``vod-nextitem-001`` was approved with both of these empty, which left
+        the comparison resting on the Delta version of the *derived* splits: it
+        cannot say which state of ``source_table`` produced them. The contract's
+        own ``label_construction`` text already demanded a reference here; this
+        is that demand made enforceable at draft time rather than at read time.
+        """
+        missing = [
+            name
+            for name in ("snapshot_id", "dataset_version")
+            if not str(getattr(self, name) or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                f"{', '.join(missing)} must name an immutable reference to "
+                f"{self.source_table!r} (a Delta version, a snapshot id or a "
+                "timestamp the table can be read `AS OF`); an empty reference "
+                "makes the campaign unreproducible"
+            )
+        return self
 
 
 class SplitPolicy(AmtModel):

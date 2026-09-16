@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -35,9 +36,11 @@ __all__ = [
     "remote_wheel_path",
     "repo_root",
     "source_tree_hash",
+    "stale_cluster_wheels",
     "upload_bytes",
     "upload_wheel",
     "uploaded_wheel",
+    "warn_stale_cluster_wheels",
     "wheel_exists",
 ]
 
@@ -47,6 +50,10 @@ __all__ = [
 HASHED_PATHS: tuple[str, ...] = ("src", "pyproject.toml")
 
 _MEMO: dict[tuple[str, str], str] = {}
+
+#: Clusters already reported on. The check costs an API call and the answer
+#: cannot change without a restart, so once per process per cluster is enough.
+_WARNED_CLUSTERS: set[str] = set()
 
 
 class WheelError(RuntimeError):
@@ -182,17 +189,79 @@ def uploaded_wheel(client: Any, directory: str) -> str | None:
     return None
 
 
+def stale_cluster_wheels(client: Any, cluster_id: str, keep: str = "") -> list[str]:
+    """``amt-*`` wheels installed on ``cluster_id`` other than ``keep``.
+
+    Cluster-scoped installs accumulate: every run against an existing cluster
+    adds one, and pip keeps serving whichever it resolved first among installs
+    that look identical to it.
+    """
+    try:
+        statuses = list(client.libraries.cluster_status(cluster_id=cluster_id))
+    except Exception:  # diagnostics only; a lost lookup must not fail the run
+        return []
+    stale = []
+    for status in statuses:
+        whl = str(getattr(getattr(status, "library", None), "whl", "") or "")
+        if whl and whl != keep and Path(whl).name.startswith("amt-"):
+            stale.append(whl)
+    return stale
+
+
+def warn_stale_cluster_wheels(client: Any, cluster_id: str, keep: str = "") -> list[str]:
+    """Warn about older ``amt`` installs on an all-purpose cluster.
+
+    This warns rather than uninstalling. A library uninstall on an all-purpose
+    cluster only takes effect after a restart, and restarting a cluster out
+    from under a campaign -- possibly one with another run on it -- is not a
+    decision a wheel-upload helper gets to make. ``scripts/clear_cluster_wheels.py``
+    is the deliberate, operator-run version of the same thing.
+    """
+    if not cluster_id or cluster_id in _WARNED_CLUSTERS:
+        return []
+    _WARNED_CLUSTERS.add(cluster_id)
+    stale = stale_cluster_wheels(client, cluster_id, keep)
+    if stale:
+        names = ", ".join(sorted(Path(p).name for p in stale))
+        warnings.warn(
+            f"cluster {cluster_id} carries {len(stale)} other amt wheel "
+            f"install(s): {names}. The build stamp in amt._version normally "
+            f"makes pip prefer {Path(keep).name or 'the new wheel'}, but an "
+            "install predating that stamp can still shadow it, and the job "
+            "then fails on arguments this code clearly has. Clearing them "
+            "needs a cluster restart, which this process will not trigger: run "
+            f"`uv run python scripts/clear_cluster_wheels.py {cluster_id}`.",
+            stacklevel=2,
+        )
+    return stale
+
+
 def ensure_wheel(
     client: Any,
     volume_path: str,
     root: str | os.PathLike[str] | None = None,
     force: bool = False,
+    cluster_id: str | None = None,
 ) -> str:
     """Return a Volume path holding a wheel built from the current source.
 
     Builds and uploads only when the source-tree hash is not already present,
-    so repeated trainer iterations reuse one artifact.
+    so repeated trainer iterations reuse one artifact. ``cluster_id``, when the
+    runs go to an existing cluster, is checked for stale installs of this same
+    package -- see :func:`warn_stale_cluster_wheels`.
     """
+    remote = _resolve_wheel(client, volume_path, root=root, force=force)
+    if cluster_id:
+        warn_stale_cluster_wheels(client, str(cluster_id), remote)
+    return remote
+
+
+def _resolve_wheel(
+    client: Any,
+    volume_path: str,
+    root: str | os.PathLike[str] | None = None,
+    force: bool = False,
+) -> str:
     base = Path(root) if root else repo_root()
     tree_hash = source_tree_hash(base)
     memo_key = (str(base), tree_hash)

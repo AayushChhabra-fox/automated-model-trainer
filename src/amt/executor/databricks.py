@@ -26,7 +26,7 @@ import os
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from amt.databricks import jobs as jobs_mod
@@ -48,6 +48,15 @@ ROLE_SPLITS: dict[str, tuple[str, ...]] = {
 RESULT_ARTIFACT = "result.json"
 
 
+def _print_progress(message: str) -> None:
+    print(f"  {message}", flush=True)
+
+
+def _elapsed(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m {secs:02d}s" if minutes else f"{secs}s"
+
+
 class DatabricksExecutor:
     """Submits AMT job runs to Databricks and returns Pydantic results."""
 
@@ -60,6 +69,7 @@ class DatabricksExecutor:
         timeout_seconds: float = jobs_mod.DEFAULT_TIMEOUT_SECONDS,
         campaign_id: str = "",
         mlflow_experiment_id: str = "",
+        progress: Callable[[str], None] | None = _print_progress,
     ) -> None:
         if settings is None:
             from amt.settings import get_settings
@@ -73,6 +83,13 @@ class DatabricksExecutor:
         self.campaign_id = campaign_id
         self._mlflow_experiment_id = mlflow_experiment_id or (settings.mlflow_experiment_id or "")
         self._wheel_uri: str | None = None
+        #: Where a submitted run announces itself. A training job is twenty
+        #: minutes of nothing otherwise, with no way to reach its log.
+        self.progress = progress
+
+    def _say(self, message: str) -> None:
+        if self.progress is not None:
+            self.progress(message)
 
     # -- plumbing ---------------------------------------------------------
 
@@ -111,7 +128,11 @@ class DatabricksExecutor:
     def ensure_wheel(self, force: bool = False) -> str:
         if self._wheel_uri is None or force:
             self._wheel_uri = wheel_mod.ensure_wheel(
-                self.client, self.volume_path, root=self.repo_root, force=force
+                self.client,
+                self.volume_path,
+                root=self.repo_root,
+                force=force,
+                cluster_id=self.settings.existing_cluster_id,
             )
         return self._wheel_uri
 
@@ -230,6 +251,7 @@ class DatabricksExecutor:
             parameters += ["--hypothesis-id", str(hypothesis_id)]
         parameters += list(extra_parameters)
 
+        family = self._family(config, frozen)
         started = time.time()
         run_id: int | None = None
         try:
@@ -239,7 +261,10 @@ class DatabricksExecutor:
                 wheel_uri=wheel_uri,
                 parameters=parameters,
                 cluster=self.settings.cluster_spec(),
+                extra_libraries=self._libraries(family),
+                custom_tags=self._cost_tags(role, hypothesis_id),
             )
+            self._say(self._submitted_line(role, family, run_id))
             run = jobs_mod.wait_for_terminal(
                 self.client,
                 run_id,
@@ -248,6 +273,7 @@ class DatabricksExecutor:
             )
         except jobs_mod.JobRunError as exc:
             raise ExecutorError(self._failure_detail(str(exc), job_run_id, run_id)) from exc
+        self._say(f"{role}: finished in {_elapsed(time.time() - started)}")
 
         payload = self.fetch_result(job_run_id)
         payload.setdefault("runtime_seconds", time.time() - started)
@@ -259,6 +285,55 @@ class DatabricksExecutor:
         payload["databricks_run_id"] = run_id
         payload["run_page_url"] = jobs_mod.run_page_url(run)
         return payload
+
+    # -- what the run needs, and who pays for it ---------------------------
+
+    @staticmethod
+    def _family(config: Any = None, frozen: Any = None) -> str:
+        """The model family this run will fit or load, if any."""
+        for source in (config, frozen):
+            if source is None:
+                continue
+            value = (
+                source.get("family")
+                if isinstance(source, Mapping)
+                else getattr(source, "family", None)
+            )
+            if value:
+                return str(value)
+        return ""
+
+    def _libraries(self, family: str) -> tuple[str, ...]:
+        """PyPI packages the family needs on top of the runtime image.
+
+        Without this a booster run depends on someone having pip-installed
+        ``xgboost`` on a long-lived cluster, which is the only reason job
+        clusters were not usable for the tabular families.
+        """
+        from amt.jobs.models.registry import requires_pip
+
+        return requires_pip(family)
+
+    def _submitted_line(self, role: str, family: str, run_id: int) -> str:
+        """``role (family): <run page url>`` -- the link to whatever happens next."""
+        url = ""
+        with contextlib.suppress(Exception):  # a missing URL must not fail a run
+            url = jobs_mod.run_page_url(jobs_mod.get_run(self.client, run_id))
+        label = f"{role} ({family})" if family else role
+        return f"{label}: {url or f'run {run_id}'}"
+
+    def _cost_tags(self, role: str, hypothesis_id: str = "") -> dict[str, str]:
+        """Tags that make this run's compute attributable in system.billing.
+
+        ``amt`` alone separates AMT from everything else in the workspace; the
+        rest let a campaign, a role or one hypothesis be costed on its own.
+        """
+        tags = {"amt": "true", "amt_role": role}
+        if self.campaign_id:
+            tags["amt_campaign_id"] = str(self.campaign_id)
+        if hypothesis_id:
+            tags["amt_hypothesis_id"] = str(hypothesis_id)
+        return tags
 
     def _failure_detail(self, message: str, job_run_id: str, run_id: int | None = None) -> str:
         """``message`` plus whatever the job said about why it died.

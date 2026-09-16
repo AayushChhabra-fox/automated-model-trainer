@@ -109,6 +109,7 @@ def resolve_cfg(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
     cfg = dict(cfg or {})
     flat = dict(DEFAULTS)
     booster: dict[str, Any] = {}
+    has_recipe = bool(cfg.get("feature_recipe"))
 
     fit_spec = cfg.get("fit_spec")
     if isinstance(fit_spec, Mapping):
@@ -125,12 +126,17 @@ def resolve_cfg(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
             if key == "family":
                 continue
             if key in FIT_KNOBS:
-                flat[key] = value
+                # Every AMT knob is part of the shape a human approved, so with a
+                # recipe the Trainer's sections cannot move one -- same reason
+                # `loss.type` is ignored below. Dropped, not demoted to a booster
+                # param: `max_train_rows` is not a hyperparameter.
+                if not has_recipe:
+                    flat[key] = value
             else:
                 booster[key] = value
 
     loss = cfg.get("loss")
-    if isinstance(loss, Mapping) and loss.get("type") and not cfg.get("feature_recipe"):
+    if isinstance(loss, Mapping) and loss.get("type") and not has_recipe:
         # With a recipe the objective is part of the shape a human approved, so
         # the Trainer's free-form `loss` cannot redirect it -- it names losses
         # the boosters do not have (`pairwise_ranking`).

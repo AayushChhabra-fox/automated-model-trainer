@@ -59,6 +59,7 @@ def build_task(
     cluster: Mapping[str, Any] | None = None,
     extra_libraries: Sequence[str] = (),
     environment_vars: Mapping[str, str] | None = None,
+    custom_tags: Mapping[str, str] | None = None,
 ):
     """A single ``python_wheel_task`` on a new job cluster (or an existing one)."""
     compute, jobs = _sdk()
@@ -88,6 +89,12 @@ def build_task(
         }
         if environment_vars:
             spec["spark_env_vars"] = dict(environment_vars)
+        if custom_tags:
+            # Tags are a property of the cluster, so they only reach
+            # `system.billing.usage.custom_tags` on a job cluster. A run on an
+            # existing all-purpose cluster is billed to that cluster and cannot
+            # be attributed here at all.
+            spec["custom_tags"] = {str(k): str(v) for k, v in custom_tags.items()}
         for optional in ("policy_id", "data_security_mode", "instance_pool_id"):
             if cluster.get(optional):
                 spec[optional] = cluster[optional]
@@ -109,6 +116,7 @@ def submit_run(
     timeout_seconds: int = 0,
     extra_libraries: Sequence[str] = (),
     environment_vars: Mapping[str, str] | None = None,
+    custom_tags: Mapping[str, str] | None = None,
 ) -> int:
     """Submit a one-time run and return its ``run_id`` (does not wait)."""
     task = build_task(
@@ -120,6 +128,7 @@ def submit_run(
         cluster=cluster,
         extra_libraries=extra_libraries,
         environment_vars=environment_vars,
+        custom_tags=custom_tags,
     )
     waiter = client.jobs.submit(
         run_name=run_name, tasks=[task], timeout_seconds=timeout_seconds

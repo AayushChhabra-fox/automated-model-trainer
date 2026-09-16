@@ -78,6 +78,24 @@ def _state(graph: Any, campaign: str) -> dict:
     return dict(snapshot.values or {})
 
 
+def _run(graph: Any, payload: Any, campaign: str) -> None:
+    """Drive the graph, printing each node as it completes.
+
+    ``stream`` and ``invoke`` reach the same state; the difference is that a
+    campaign spending twenty minutes in a Databricks job says which stage it is
+    in rather than nothing at all. The executor prints the run's page URL.
+    """
+    for update in graph.stream(payload, _config(campaign), stream_mode="updates"):
+        for node, delta in (update or {}).items():
+            # `__interrupt__` arrives here too, with a tuple rather than a
+            # state delta; `_report_position` renders that from the snapshot.
+            if not isinstance(delta, dict):
+                continue
+            stage = str(delta.get("stage") or "")
+            suffix = f"  [dim]{stage}[/dim]" if stage and stage != node else ""
+            console.print(f"[dim]▸[/dim] {node}{suffix}")
+
+
 def _resume(campaign: str, payload: dict, mock: bool) -> None:
     from langgraph.types import Command
 
@@ -85,7 +103,7 @@ def _resume(campaign: str, payload: dict, mock: bool) -> None:
     if not _state(graph, campaign):
         console.print(f"[red]No campaign named {campaign!r}.[/red] Run `amt start` first.")
         raise typer.Exit(code=1)
-    graph.invoke(Command(resume=payload), _config(campaign))
+    _run(graph, Command(resume=payload), campaign)
     _report_position(graph, campaign)
 
 
@@ -164,7 +182,7 @@ def start(
             max_compute_minutes=max_compute_minutes,
         ),
     )
-    graph.invoke(state, _config(campaign))
+    _run(graph, state, campaign)
     _report_position(graph, campaign)
 
 
@@ -201,7 +219,7 @@ def resume(
         console.print("[yellow]Campaign is awaiting a human decision.[/yellow]")
         _report_position(graph, campaign)
         raise typer.Exit(code=0)
-    graph.invoke(None, _config(campaign))
+    _run(graph, None, campaign)
     _report_position(graph, campaign)
 
 

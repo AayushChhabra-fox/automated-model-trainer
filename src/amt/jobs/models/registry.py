@@ -21,6 +21,7 @@ __all__ = [
     "FAMILIES",
     "PYFUNC_INPUT_COLUMNS",
     "RECIPE_FAMILIES",
+    "REQUIRES_PIP",
     "RecommenderPyfunc",
     "UnknownFamily",
     "fit_model",
@@ -30,6 +31,7 @@ __all__ = [
     "log_pyfunc_model",
     "pyfunc_signature",
     "recommend_with_pyfunc",
+    "requires_pip",
     "save_model",
 ]
 
@@ -57,9 +59,32 @@ RECIPE_FAMILIES: frozenset[str] = frozenset(
 
 PYFUNC_INPUT_COLUMNS = ("history", "k")
 
+# PyPI packages a family needs that the runtime image is not guaranteed to carry.
+# The executor passes these as `extra_libraries` on the job submission, so a fresh
+# job cluster installs the family's backend per run instead of someone having to
+# prepare a long-lived cluster by hand. `sasrec` is absent because `torch` ships
+# with every ML runtime; `popularity` needs nothing beyond pandas.
+REQUIRES_PIP: dict[str, tuple[str, ...]] = {
+    "xgboost_classifier": ("xgboost",),
+    "xgboost_reranker": ("xgboost",),
+    "lightgbm_classifier": ("lightgbm",),
+    "lightgbm_reranker": ("lightgbm",),
+}
+
 
 class UnknownFamily(KeyError):
     """Raised when an ExperimentConfig names a family that does not exist."""
+
+
+def requires_pip(family: str) -> tuple[str, ...]:
+    """Packages to install alongside the wheel for ``family``.
+
+    Deliberately tolerant of an unknown or empty name: the caller is the
+    executor deciding what to install, and a bad family must fail on the
+    cluster with :class:`UnknownFamily` rather than here, where the message
+    would be about libraries.
+    """
+    return REQUIRES_PIP.get(str(family).strip().lower(), ())
 
 
 def _normalize(family: str) -> str:

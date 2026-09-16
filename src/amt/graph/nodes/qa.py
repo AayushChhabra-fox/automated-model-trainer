@@ -6,7 +6,6 @@ from collections.abc import Callable
 
 from amt.graph.deps import NodeDeps
 from amt.graph.routing import (
-    PHASE0_MAX_ATTEMPTS,
     ContractViolation,
     assert_contract_hash,
     assert_ready_for_qa,
@@ -23,6 +22,7 @@ def make_qa_phase0_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         contract = state.get("evaluation_contract")
         frozen = state.get("frozen_champion")
         attempts = int(state.get("phase0_attempts", 0) or 0) + 1
+        max_attempts = int(deps.settings.phase0_max_attempts)
 
         result = deps.executor.run_qa_phase0(frozen, contract)
         result = result.model_copy(update={"attempt": attempts})
@@ -33,6 +33,9 @@ def make_qa_phase0_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
             "stage": Stage.QA_PHASE0.value,
             "qa_phase0": result,
             "phase0_attempts": attempts,
+            # `route_after_qa_phase0` reads the cap from here rather than from
+            # settings, so it stays a pure function of state.
+            "phase0_max_attempts": max_attempts,
         }
         if result.passed:
             return update
@@ -47,7 +50,7 @@ def make_qa_phase0_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
             }
         )
         update["qa_phase0"] = result
-        if not triage.fixable or attempts >= PHASE0_MAX_ATTEMPTS:
+        if not triage.fixable or attempts >= max_attempts:
             # Out of repairs: the experiment is invalid, not the hypothesis.
             update["qa_decision"] = QADecision.INVALID_EXPERIMENT
             update["status"] = "aborted"

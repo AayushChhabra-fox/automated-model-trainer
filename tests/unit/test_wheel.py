@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import pytest
@@ -9,11 +10,14 @@ from packaging.utils import parse_wheel_filename
 from packaging.version import Version
 
 from amt._version import BASE_VERSION, version
+from amt.databricks import wheel as wheel_mod
 from amt.databricks.wheel import (
     build_stamp,
     remote_wheel_dir,
     remote_wheel_path,
+    stale_cluster_wheels,
     uploaded_wheel,
+    warn_stale_cluster_wheels,
 )
 
 VOLUME = "/Volumes/cat/schema/amt_artifacts"
@@ -51,9 +55,34 @@ class _Files:
         return [_Entry(p) for p in self.listing[directory]]
 
 
+class _Library:
+    def __init__(self, whl: str) -> None:
+        self.whl = whl
+
+
+class _Status:
+    def __init__(self, whl: str) -> None:
+        self.library = _Library(whl)
+
+
+class _Libraries:
+    def __init__(self, installed: list[str]) -> None:
+        self.installed = installed
+        self.uninstalled: list[Any] = []
+
+    def cluster_status(self, cluster_id: str) -> list[_Status]:
+        return [_Status(p) for p in self.installed]
+
+    def uninstall(self, **kwargs: Any) -> None:  # pragma: no cover - must not be called
+        self.uninstalled.append(kwargs)
+
+
 class _Client:
-    def __init__(self, listing: dict[str, list[str]]) -> None:
-        self.files: Any = _Files(listing)
+    def __init__(
+        self, listing: dict[str, list[str]] | None = None, installed: list[str] | None = None
+    ) -> None:
+        self.files: Any = _Files(listing or {})
+        self.libraries: Any = _Libraries(installed or [])
 
 
 def test_the_cache_probe_finds_a_wheel_without_guessing_its_name() -> None:
@@ -95,3 +124,58 @@ def test_a_stamp_pep_440_cannot_express_is_refused(monkeypatch: Any) -> None:
 
     with pytest.raises(ValueError, match="local version"):
         version()
+
+
+# -- stale installs on an all-purpose cluster ------------------------------
+
+
+CURRENT = f"{remote_wheel_dir(VOLUME, TREE_HASH)}/{WHEEL}"
+OLDER = f"{VOLUME}/wheels/0123456789ab/{WHEEL}"
+
+
+@pytest.fixture(autouse=True)
+def _forget_warned_clusters() -> Any:
+    wheel_mod._WARNED_CLUSTERS.clear()
+    yield
+    wheel_mod._WARNED_CLUSTERS.clear()
+
+
+def test_other_amt_installs_are_found_and_the_current_one_is_not() -> None:
+    client = _Client(installed=[CURRENT, OLDER, f"{VOLUME}/wheels/x/other-1.0.whl"])
+
+    assert stale_cluster_wheels(client, "c-1", keep=CURRENT) == [OLDER]
+
+
+def test_a_cluster_lookup_that_fails_is_not_a_reason_to_fail_the_run() -> None:
+    class _Broken:
+        libraries: Any = type(
+            "L", (), {"cluster_status": staticmethod(lambda **_: (_ for _ in ()).throw(OSError()))}
+        )()
+
+    assert stale_cluster_wheels(_Broken(), "c-1", keep=CURRENT) == []
+
+
+def test_a_stale_install_warns_and_points_at_the_script_without_uninstalling() -> None:
+    """An uninstall only lands on restart, which this code must not trigger."""
+    client = _Client(installed=[CURRENT, OLDER])
+
+    with pytest.warns(UserWarning, match="clear_cluster_wheels.py c-1"):
+        assert warn_stale_cluster_wheels(client, "c-1", keep=CURRENT) == [OLDER]
+
+    assert client.libraries.uninstalled == []
+
+
+def test_the_cluster_is_only_reported_on_once_per_process() -> None:
+    client = _Client(installed=[CURRENT, OLDER])
+    with pytest.warns(UserWarning):
+        warn_stale_cluster_wheels(client, "c-1", keep=CURRENT)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert warn_stale_cluster_wheels(client, "c-1", keep=CURRENT) == []
+
+
+def test_a_clean_cluster_says_nothing() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert warn_stale_cluster_wheels(_Client(installed=[CURRENT]), "c-1", CURRENT) == []

@@ -36,10 +36,7 @@ class Phase0Result(AmtModel):
     checks: list[IntegrityCheck] = Field(default_factory=list)
     artifact_loaded: bool = False
     expected_model_version: str = ""
-    preprocessing_present: bool = False
-    features_available: bool = False
     schema_compatible: bool = False
-    train_inference_consistent: bool = False
     contract_hash_matches: bool = False
     harness_version_matches: bool = False
     inference_executed: bool = False

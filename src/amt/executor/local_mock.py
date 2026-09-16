@@ -198,17 +198,18 @@ class LocalMockExecutor:
         broken = self.phase0_invalid_first_attempt and attempt == 1
 
         checks = [
-            IntegrityCheck(name="artifact_loads", passed=not broken, detail="pyfunc load"),
+            IntegrityCheck(
+                name="artifact_loads",
+                passed=not broken,
+                detail=(
+                    "preprocessing artifact missing from the logged model"
+                    if broken
+                    else "pyfunc load"
+                ),
+            ),
             IntegrityCheck(name="serialization_valid", passed=True),
             IntegrityCheck(name="model_version_expected", passed=True),
-            IntegrityCheck(
-                name="preprocessing_present",
-                passed=not broken,
-                detail="preprocessing artifact missing from the logged model" if broken else "",
-            ),
-            IntegrityCheck(name="features_available", passed=True),
             IntegrityCheck(name="schema_compatible", passed=True),
-            IntegrityCheck(name="train_inference_consistent", passed=True),
             IntegrityCheck(
                 name="contract_hash_matches",
                 passed=frozen.contract_hash == contract.contract_hash,
@@ -231,10 +232,7 @@ class LocalMockExecutor:
             checks=checks,
             artifact_loaded=not broken,
             expected_model_version=frozen.config_hash[:12],
-            preprocessing_present=not broken,
-            features_available=True,
             schema_compatible=True,
-            train_inference_consistent=True,
             contract_hash_matches=frozen.contract_hash == contract.contract_hash,
             harness_version_matches=True,
             inference_executed=not broken,

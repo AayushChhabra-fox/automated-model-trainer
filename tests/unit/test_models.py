@@ -403,6 +403,52 @@ def test_tabular_cfg_resolution_separates_booster_params_from_amt_knobs():
     }
 
 
+def test_an_approved_recipe_freezes_the_amt_knobs_against_the_trainer():
+    """The Trainer tunes booster params; the shape is the human's, not its.
+
+    `objective` went through this route in `vod-nextitem-001`: a `training`
+    section naming one the approved FitSpec did not have.
+    """
+    from amt.jobs.models import tabular_common
+
+    drifted = _tabular_cfg("xgboost_reranker")
+    drifted["training"] = {
+        "learning_rate": 0.2,
+        "objective": "rank:ndcg",
+        "max_train_rows": 10,
+        "negative_samples_per_positive": 99,
+    }
+    flat = tabular_common.resolve_cfg(drifted)
+
+    assert flat["negative_samples_per_positive"] == 3  # the approved fit_spec's
+    assert flat["max_train_rows"] == tabular_common.DEFAULTS["max_train_rows"]
+    assert "objective" not in flat
+    # Rejected, not smuggled in as a hyperparameter.
+    assert flat["booster_params"] == {
+        "min_child_weight": 1,
+        "max_depth": 3,
+        "learning_rate": 0.2,
+    }
+
+    without_recipe = {**drifted, "feature_recipe": None}
+    assert tabular_common.resolve_cfg(without_recipe)["max_train_rows"] == 10
+
+
+@pytest.mark.parametrize(
+    ("family", "expected"),
+    [
+        ("xgboost_reranker", ("xgboost",)),
+        ("lightgbm_classifier", ("lightgbm",)),
+        ("sasrec", ()),
+        ("popularity", ()),
+        ("", ()),
+    ],
+)
+def test_each_family_declares_the_packages_a_job_cluster_must_install(family, expected):
+    """A booster on a fresh job cluster brings its own backend (B7)."""
+    assert registry.requires_pip(family) == expected
+
+
 def test_tabular_recipe_is_required():
     from amt.jobs.models import tabular_common
 

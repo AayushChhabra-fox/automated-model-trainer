@@ -95,6 +95,8 @@ class CampaignState(TypedDict, total=False):
     frozen_champion: FrozenChampion | None
     qa_phase0: Phase0Result | None
     phase0_attempts: int
+    # Stamped by `qa_phase0` from settings so routing never reads settings itself.
+    phase0_max_attempts: int
     qa_phase1: Phase1Result | None
     qa_assessment: QAAssessment | None
     qa_decision: QADecision | None
@@ -157,6 +159,7 @@ def new_campaign_state(
         frozen_champion=None,
         qa_phase0=None,
         phase0_attempts=0,
+        phase0_max_attempts=0,
         qa_phase1=None,
         qa_assessment=None,
         qa_decision=None,

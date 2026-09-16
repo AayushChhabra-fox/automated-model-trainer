@@ -42,6 +42,12 @@ name objects and columns that exist:
 
 Leave every split's `table` empty: materialization names the output tables.
 
+`dataset.snapshot_id` and `dataset.dataset_version` are required and rejected when blank.
+They are not executed, but without them nobody can say which state of `source_table`
+produced the splits. Name what the investigation actually established — the table's Delta
+version, a snapshot id, or the instant it is readable `AS OF` — and say so plainly if the
+only reference available is the read timestamp.
+
 ## Metric vocabulary
 
 The harness evaluates top-K recommendation: for each user it ranks items and compares the
