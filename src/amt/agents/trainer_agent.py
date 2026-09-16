@@ -79,6 +79,7 @@ class TrainerAgent(AgentBase):
         plan: ExperimentPlan,
         history: list[RunSummary] | None = None,
         iteration: int = 1,
+        repeats: list[str] | None = None,
     ) -> TrainerInterpretation:
         agent = self.agent("trainer.interpret", "trainer_interpret", TrainerInterpretation)
         return agent.invoke(
@@ -89,6 +90,7 @@ class TrainerAgent(AgentBase):
                 "experiment_history": [h.model_dump() for h in history or []],
                 "iteration": iteration,
                 "max_iterations": plan.max_iterations,
+                "repeated_configurations": repeats or [],
             }
         )
 

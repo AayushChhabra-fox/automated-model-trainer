@@ -142,7 +142,9 @@ def _recipe_attribute_frames(
                 f"feature recipe source {source.get('name')!r} needs table {table!r} "
                 "but this job has no Spark session"
             )
-        keys = [str(k) for k in (source.get("join_keys") or [])] or [item_col]
+        # Attribute sources attach at the item grain; the recipe no longer
+        # declares join keys because nothing else was ever supported.
+        keys = [item_col]
         columns = [str(c) for c in (source.get("columns") or [])]
         wanted = ", ".join(dict.fromkeys([*keys, *columns]))
         frames[str(source.get("name") or table)] = to_pandas(

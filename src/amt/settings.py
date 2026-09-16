@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     phase0_max_attempts: int = Field(
         default=3, validation_alias=AliasChoices("AMT_PHASE0_MAX_ATTEMPTS")
     )
+    # `n` candidates per validation row is the one recipe number that can make a
+    # job unrunnable, and it looks innocuous in the proposal.
+    max_candidate_rows: int = Field(
+        default=50_000_000, validation_alias=AliasChoices("AMT_MAX_CANDIDATE_ROWS")
+    )
 
     @field_validator("checkpoint_db", mode="before")
     @classmethod

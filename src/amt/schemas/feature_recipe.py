@@ -15,6 +15,7 @@ returns the campaign to the checkpoint.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Literal
 
 from pydantic import Field, model_validator
@@ -63,7 +64,6 @@ class RecipeSource(AmtModel):
         default=None, description="Fully-qualified UC table, for feature attributes only."
     )
     columns: list[str] = Field(default_factory=list)
-    join_keys: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _exactly_one_origin(self) -> RecipeSource:
@@ -77,14 +77,6 @@ class RecipeSource(AmtModel):
                 "the labelled population comes from the frozen splits"
             )
         return self
-
-
-class RecipeJoin(AmtModel):
-    """How a source is attached to the candidate rows."""
-
-    source: str = Field(description="``RecipeSource.name`` being joined in.")
-    keys: list[str] = Field(min_length=1)
-    how: Literal["left", "inner"] = "left"
 
 
 class RecipeFilter(AmtModel):
@@ -190,7 +182,6 @@ class FeatureRecipe(AmtModel):
     recipe_id: str = Field(default_factory=lambda: new_id("recipe"))
     row_grain: Literal["user_item_candidate"] = "user_item_candidate"
     sources: list[RecipeSource] = Field(default_factory=list)
-    joins: list[RecipeJoin] = Field(default_factory=list)
     feature_columns: list[FeatureTransform] = Field(default_factory=list, min_length=1)
     label: LabelSpec = Field(default_factory=LabelSpec)
     group_key: str = Field(default="user_id", description="Query grouping for the rankers.")
@@ -200,11 +191,10 @@ class FeatureRecipe(AmtModel):
     notes: str = ""
 
     @model_validator(mode="after")
-    def _joins_reference_declared_sources(self) -> FeatureRecipe:
-        names = {s.name for s in self.sources}
-        unknown = [j.source for j in self.joins if j.source not in names]
-        if unknown:
-            raise ValueError(f"joins reference undeclared sources: {sorted(unknown)}")
+    def _feature_names_are_distinct(self) -> FeatureRecipe:
+        # An attribute source attaches on the item column; there was a `joins`
+        # block declaring how, validated and never executed, which meant the
+        # planner kept writing join graphs the runtime silently ignored.
         distinct = {t.name for t in self.feature_columns}
         if len(distinct) != len(self.feature_columns):
             raise ValueError("feature_columns contain duplicate names")
@@ -311,3 +301,39 @@ def is_tabular_family(family: str | None) -> bool:
 
 def is_ranker_family(family: str | None) -> bool:
     return str(family or "").strip().lower() in RANKER_FAMILIES
+
+
+def runtime_vocabulary() -> dict[str, list[str]]:
+    """Everything a hypothesis is allowed to require, as literals.
+
+    Rendered into the Planner's context so the backlog is written against what
+    exists, and used to strike out hypotheses that need something else. Derived
+    from the ``Literal`` types rather than restated, so the two cannot drift.
+    """
+    from typing import get_args
+
+    from amt.jobs.models.registry import FAMILIES
+
+    return {
+        "families": sorted(FAMILIES),
+        "transform_kinds": sorted(get_args(TransformKind)),
+        "candidate_strategies": sorted(get_args(CandidateStrategy)),
+        "label_strategies": sorted(get_args(LabelStrategy)),
+        "count_scopes": sorted(get_args(CountScope)),
+        "cast_targets": sorted(get_args(CastTarget)),
+        "filter_ops": sorted(get_args(FilterOp)),
+        "source_roles": sorted(get_args(SourceRole)),
+        "base_columns": list(BASE_COLUMNS),
+    }
+
+
+def unsupported_requirements(requires: Iterable[str]) -> list[str]:
+    """The entries of ``requires`` this runtime cannot provide."""
+    known = {value for values in runtime_vocabulary().values() for value in values}
+    return sorted(
+        {
+            requirement
+            for requirement in requires
+            if str(requirement).strip() and str(requirement).strip() not in known
+        }
+    )

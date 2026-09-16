@@ -36,7 +36,6 @@ from amt.schemas.feature_recipe import (
     FeatureTransform,
     FitSpec,
     LabelSpec,
-    RecipeJoin,
     RecipeSource,
 )
 from amt.schemas.hypothesis import ExperimentPlan, Hypothesis, HypothesisBacklog
@@ -355,10 +354,8 @@ class CannedResponder:
                     role="item_attributes",
                     split="train",
                     columns=["event_type"],
-                    join_keys=["item_id"],
                 ),
             ],
-            joins=[RecipeJoin(source="item_attrs", keys=["item_id"])],
             feature_columns=[
                 FeatureTransform(name="item_popularity", kind="count", of="item_id", over="train"),
                 FeatureTransform(name="history_length", kind="column", source="history_length"),

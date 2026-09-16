@@ -6,7 +6,11 @@ from amt.agents.base import AgentBase
 from amt.schemas.champion import FinalChampionSelection, HypothesisChampion
 from amt.schemas.conclusion import ScientificConclusion
 from amt.schemas.evaluation_contract import EvaluationContract
-from amt.schemas.feature_recipe import ApprovedShape, FeatureFitProposal
+from amt.schemas.feature_recipe import (
+    ApprovedShape,
+    FeatureFitProposal,
+    runtime_vocabulary,
+)
 from amt.schemas.hypothesis import ExperimentPlan, Hypothesis, HypothesisBacklog
 from amt.schemas.problem_spec import ProblemSpec
 from amt.schemas.qa import Phase0Result, Phase1Result, QAAssessment
@@ -25,13 +29,27 @@ class PlannerAgent(AgentBase):
         history: list[RunSummary] | None = None,
         existing: list[Hypothesis] | None = None,
         human_feedback: str | None = None,
+        baseline_metrics: dict[str, float] | None = None,
     ) -> HypothesisBacklog:
-        """The campaign backlog. Presented for human approval before anything is planned."""
+        """The campaign backlog. Presented for human approval before anything is planned.
+
+        The runtime's vocabulary and the baseline's numbers go in as context:
+        the previous campaign's backlog proposed transforms that do not exist
+        and effect sizes untethered to what the baseline actually scored.
+        """
         agent = self.agent("planner.hypotheses", "planner_hypotheses", HypothesisBacklog)
         return agent.invoke(
             {
                 "problem_spec": spec,
                 "evaluation_contract": contract,
+                "runtime_vocabulary": runtime_vocabulary(),
+                "baseline_validation_metrics": baseline_metrics or {},
+                # Summaries only: `rows` holds up to 200 sampled rows per probe,
+                # which would be most of the prompt and none of the signal.
+                "data_investigation": [
+                    {"action": o.action, "target": o.target, "summary": o.summary}
+                    for o in spec.investigation_notes
+                ],
                 "experiment_history": [h.model_dump() for h in history or []],
                 "existing_hypotheses": [h.model_dump() for h in existing or []],
                 "human_feedback": human_feedback,
@@ -104,6 +122,8 @@ class PlannerAgent(AgentBase):
                 "validation_split": contract.validation_split,
                 "label_definition": contract.label_definition,
                 "candidate_generation_rules": contract.candidate_generation_rules,
+                "runtime_vocabulary": runtime_vocabulary(),
+                "max_candidate_rows": self.settings.max_candidate_rows,
                 "target_family": family,
                 "previous_proposal": previous,
                 "human_feedback": human_feedback,

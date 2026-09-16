@@ -9,7 +9,7 @@ from pydantic import Field
 from amt.schemas.common import AmtModel, new_id
 from amt.schemas.feature_recipe import FeatureRecipe, FitSpec
 
-HypothesisStatus = Literal["pending", "active", "converged", "abandoned", "falsified"]
+HypothesisStatus = Literal["pending", "active", "converged", "abandoned", "falsified", "infeasible"]
 
 
 class Hypothesis(AmtModel):
@@ -34,6 +34,14 @@ class Hypothesis(AmtModel):
     # tabular shape in the backlog at once, so it has to know which hypotheses
     # are tabular before any of them is planned.
     family: str = Field(default="", description="Model family this hypothesis proposes to test.")
+    # Checked against the runtime's vocabulary before a human reads the backlog:
+    # a hypothesis needing something unbuildable is struck out with a reason
+    # rather than approved and discovered three stages later, on a cluster.
+    requires: list[str] = Field(
+        default_factory=list,
+        description="Families, transform kinds and candidate strategies this needs.",
+    )
+    infeasible_reason: str = ""
     expected_effect_size: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     estimated_cost_minutes: float = Field(default=30.0, ge=0.0)

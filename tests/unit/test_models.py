@@ -338,10 +338,8 @@ def _recipe(**overrides) -> dict:
                 "role": "item_attributes",
                 "split": "train",
                 "columns": ["item_genre"],
-                "join_keys": ["item_id"],
             },
         ],
-        "joins": [{"source": "attrs", "keys": ["item_id"], "how": "left"}],
         "feature_columns": [
             {"name": "pop", "kind": "count", "of": "item_id", "over": "train"},
             {"name": "genre", "kind": "cast", "source": "item_genre", "to": "code"},

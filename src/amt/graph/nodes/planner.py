@@ -11,7 +11,12 @@ from amt.graph.human import apply_checklist, parse_resume
 from amt.graph.routing import ContractViolation, assert_contract_hash
 from amt.graph.state import CampaignState, Stage
 from amt.schemas.common import ExperimentBudget
-from amt.schemas.feature_recipe import ApprovedShape, is_tabular_family
+from amt.schemas.feature_recipe import (
+    ApprovedShape,
+    is_tabular_family,
+    runtime_vocabulary,
+    unsupported_requirements,
+)
 from amt.schemas.hypothesis import Hypothesis
 
 
@@ -22,23 +27,49 @@ def make_planner_hypotheses_node(deps: NodeDeps) -> Callable[[CampaignState], di
         contract = state.get("evaluation_contract")
         spec = state.get("problem_spec")
         assert_contract_hash(state, contract)
+        baseline = state.get("last_result")
         backlog = deps.planner_agent.propose_hypotheses(
             spec,
             contract,
             history=list(state.get("experiment_history") or []),
             existing=list(state.get("hypotheses") or []),
             human_feedback=state.get("human_feedback"),
+            baseline_metrics=dict(getattr(baseline, "validation_metrics", {}) or {}),
         )
+        hypotheses = [_mark_feasibility(h) for h in backlog.hypotheses]
         return {
             "stage": Stage.HYPOTHESES.value,
             "status": "running",
-            "hypotheses": sorted(backlog.hypotheses, key=lambda h: (h.priority, -h.confidence)),
+            "hypotheses": sorted(hypotheses, key=lambda h: (h.priority, -h.confidence)),
             "backlog_rationale": backlog.prioritization_rationale,
             "hypotheses_approved": False,
             "human_feedback": None,
         }
 
     return planner_hypotheses_node
+
+
+def _mark_feasibility(hypothesis: Hypothesis) -> Hypothesis:
+    """Strike out a hypothesis this runtime cannot build, with the reason.
+
+    ``infeasible`` is not in ``pending``, so selection skips it; the human still
+    sees it at HC_BACKLOG, struck through, which is more useful than a backlog
+    that quietly omits the idea.
+    """
+    unsupported = unsupported_requirements(hypothesis.requires)
+    if hypothesis.family and hypothesis.family not in runtime_vocabulary()["families"]:
+        unsupported = sorted({*unsupported, hypothesis.family})
+    if not unsupported:
+        return hypothesis
+    return hypothesis.model_copy(
+        update={
+            "status": "infeasible",
+            "infeasible_reason": (
+                f"this runtime cannot provide {unsupported}; "
+                "no transform, candidate strategy or family expresses it"
+            ),
+        }
+    )
 
 
 def make_hc_hypotheses_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
@@ -262,7 +293,9 @@ def make_hc_feature_fit_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
                     }
                     for hypothesis_id, proposal in sorted(proposals.items())
                 },
-                "duplicate_shapes": _duplicate_shapes(proposals),
+                "duplicate_shapes": _duplicate_shapes(
+                    proposals, list(state.get("experiment_history") or [])
+                ),
                 "validation_rows": getattr(contract.validation_split, "row_count", 0)
                 if contract
                 else 0,
@@ -320,21 +353,34 @@ def _ordered_shape(proposal) -> dict:
     }
 
 
-def _duplicate_shapes(proposals: dict) -> dict[str, list[str]]:
-    """Hypotheses that reduce to the same shape, so a reviewer can strike one.
+def _duplicate_shapes(proposals: dict, history: list | None = None) -> dict[str, list[str]]:
+    """Hypotheses that reduce to a shape already proposed or already run.
 
     Two hypotheses with one ``feature_fit_hash`` are one experiment billed
-    twice; the backlog reads as five ideas and spends like three.
+    twice; a backlog reads as five ideas and spends like three. Runs already in
+    ``experiment_history`` count too — re-proposing a shape the campaign has
+    measured is the most expensive kind of duplicate.
     """
     by_hash: dict[str, list[str]] = {}
     for hypothesis_id, proposal in sorted(proposals.items()):
         by_hash.setdefault(proposal.feature_fit_hash, []).append(hypothesis_id)
-    return {
-        hypothesis_id: [other for other in ids if other != hypothesis_id]
-        for ids in by_hash.values()
-        if len(ids) > 1
-        for hypothesis_id in ids
-    }
+
+    already_run: dict[str, set[str]] = {}
+    for summary in history or []:
+        if summary.feature_fit_hash:
+            already_run.setdefault(summary.feature_fit_hash, set()).add(
+                summary.hypothesis_id or summary.run_id
+            )
+
+    duplicates: dict[str, list[str]] = {}
+    for shape_hash, ids in by_hash.items():
+        run_before = sorted(already_run.get(shape_hash, ()))
+        for hypothesis_id in ids:
+            others = [other for other in ids if other != hypothesis_id]
+            marks = others + [f"already run as {ran}" for ran in run_before]
+            if marks:
+                duplicates[hypothesis_id] = marks
+    return duplicates
 
 
 def make_planner_final_champion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:

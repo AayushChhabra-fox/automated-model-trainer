@@ -150,6 +150,7 @@ def make_execute_training_node(deps: NodeDeps) -> Callable[[CampaignState], dict
             mlflow_run_id=result.mlflow_run_id,
             hypothesis_id=result.hypothesis_id or (state.get("current_hypothesis_id") or ""),
             config_hash=result.config_hash,
+            feature_fit_hash=config.feature_fit_hash,
             iteration=iteration,
             primary_metric=contract.primary_metric,
             primary_metric_value=result.primary(contract.primary_metric),
@@ -169,6 +170,27 @@ def make_execute_training_node(deps: NodeDeps) -> Callable[[CampaignState], dict
     return execute_training_node
 
 
+def _repeated_configs(history: list[RunSummary]) -> list[str]:
+    """Iterations whose configuration is bit-identical to an earlier one.
+
+    A retune that changes nothing is not an iteration's worth of evidence, and
+    the Trainer has no other way to notice: it reads metrics, and identical
+    configurations produce identical metrics that look like a plateau.
+    """
+    seen: dict[str, int] = {}
+    repeats = []
+    for summary in history:
+        if not summary.config_hash:
+            continue
+        first = seen.setdefault(summary.config_hash, summary.iteration)
+        if first != summary.iteration:
+            repeats.append(
+                f"iteration {summary.iteration} repeats iteration {first} exactly "
+                f"(config_hash {summary.config_hash[:12]})"
+            )
+    return repeats
+
+
 def make_trainer_interpret_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
     """Observation → Interpretation → Proposed Change → Expected Effect, plus convergence."""
 
@@ -185,6 +207,7 @@ def make_trainer_interpret_node(deps: NodeDeps) -> Callable[[CampaignState], dic
             plan=plan,
             history=history,
             iteration=int(state.get("iteration", 0) or 0),
+            repeats=_repeated_configs(history),
         )
         if history:
             history[-1] = history[-1].model_copy(

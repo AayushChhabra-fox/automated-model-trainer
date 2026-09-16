@@ -10,11 +10,28 @@ all six questions:
 5. which metric should improve;
 6. what result would weaken or falsify it.
 
-The model classes available are `popularity` (baseline), `sasrec` (sequence model) and four
-gradient-boosting families — `xgboost_classifier`, `xgboost_reranker`,
-`lightgbm_classifier`, `lightgbm_reranker` — whose feature set is yours to declare later and
-is therefore the right choice when the hypothesis is about *what the model sees* rather than
-about architecture.
+## What this runtime can actually build
+
+`runtime_vocabulary` in the context below is the complete list: the model families, the
+transform kinds, the candidate strategies, the label strategies and the columns that exist
+on every row without being declared. There is nothing else. An embedding lookup, a
+sequence encoder inside a booster, a windowed aggregate, a second interaction table — none
+of those exist, and a hypothesis that needs one cannot be tested here.
+
+Set `family` on every hypothesis, from `runtime_vocabulary.families`. `popularity` is the
+    10|baseline; `sasrec` is the sequence model with a fixed input shape; the four
+gradient-boosting families take a `FeatureRecipe` you declare at the next checkpoint, and
+are therefore the right choice when the hypothesis is about *what the model sees* rather
+than about architecture.
+
+List in `requires` every family, transform kind and candidate strategy the hypothesis
+depends on, using the exact literals from `runtime_vocabulary`. This is checked
+mechanically: anything not in the vocabulary marks the hypothesis infeasible, and it is
+struck out before a human reads it. Listing what you need honestly is better than omitting
+it — an infeasible hypothesis with a clear `requires` tells the operator what the runtime is
+    20|missing, which is useful; one that claims to need nothing and then cannot be built is not.
+
+## What makes a good backlog
 
 Do not generate architecture variations without a modeling hypothesis. A hyperparameter
 sweep is not a hypothesis. Prioritise by expected value, confidence and cost — `priority` 1
@@ -24,12 +41,15 @@ Keep the backlog small: a handful of genuinely different ideas beats a long list
 variations. The objective is not to maximise the number of experiments; it is to determine
 efficiently whether a hypothesis produces a reproducible, meaningful improvement.
 
-A human approves this backlog before any of it is planned, so propose nothing this campaign
-cannot actually run: every hypothesis must be testable with the frozen EvaluationContract,
-the metrics it names, and the feature transforms the booster runtime executes. A hypothesis
-that needs a transform the `FeatureRecipe` cannot express is not a hypothesis for this
-campaign — leave it out and say so in `prioritization_rationale`.
+    30|**Each hypothesis must be distinguishable from every other by the shape it will fit.** Two
+hypotheses whose `FeatureRecipe` and `FitSpec` would reduce to the same structure are one
+experiment described twice, and the campaign pays for both. If two of your ideas differ only
+in hyperparameters or in wording, write one.
+
+Ground the numbers. `baseline_validation_metrics` is what the baseline actually scored under
+this contract, and `data_investigation` is what the probes found in this data. An
+`expected_effect_size` should be a delta against that baseline, not a figure from a paper.
 
 When `existing_hypotheses` and `human_feedback` are present the backlog was rejected: return
 the revised backlog. Keep the hypotheses the feedback did not object to, with their ids and
-wording intact, drop or replace the ones it did, and reprioritise what remains.
+    40|wording intact, drop or replace the ones it did, and reprioritise what remains.

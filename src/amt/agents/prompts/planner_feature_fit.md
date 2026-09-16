@@ -11,8 +11,9 @@ hypothesis, not from habit.
 Rows are `(user history, candidate item)` pairs. Declare:
 
 - `sources` — each one either a frozen split (`split: train` / `validation`) or a UC table
-  that supplies item attributes (`role: item_attributes`). Never the `qa` split.
-- `joins` — how each attribute source attaches to the candidate rows.
+  that supplies item attributes (`role: item_attributes`). Never the `qa` split. An
+  attribute source attaches at the item grain; there is no join specification because no
+  other grain is supported.
 - `feature_columns` — one entry per numeric feature, each using exactly one transform:
   `column`, `cast`, `bucket`, `hash`, `count` (`over: train` for catalog frequency,
   `over: history` for affinity between the candidate and the user's history), `ratio` of two
@@ -20,8 +21,17 @@ Rows are `(user history, candidate item)` pairs. Declare:
 - `label` — `holdout_next_item` (positive is the user's last train interaction),
   `interaction_positive`, or `label_column` with an explicit column and positive values.
 - `group_key` — the request grouping the rerankers train on.
-- `candidate_generation` — `popularity_topn` or `history_attribute_expansion` plus `n`.
+- `candidate_generation` — the strategy plus `n`.
 - `filters` — closed-form row filters only.
+
+### The candidate-row budget
+
+Feature building materialises one row per (evaluation unit × candidate), so
+`n × validation_split.row_count` is the size of the frame this job builds in memory.
+`max_candidate_rows` in the context is the cap. Compute the product, state it in
+`rationale`, and choose an `n` that stays under the cap — a plausible-looking `n = 200`
+against a 44 000-row validation split is 8.8 million rows, and a job that exceeds the cap
+is refused rather than left to die on the cluster.
 
 These columns exist on every row without being declared: `item_id`, `history_length`,
 `item_train_count`, `item_train_rank`.

@@ -59,6 +59,10 @@ class RunSummary(AmtModel):
     mlflow_run_id: str
     hypothesis_id: str = ""
     config_hash: str = ""
+    # The approved shape this run was fitted under. Two runs sharing it differ
+    # only in hyperparameters, which is what makes a bit-identical retune
+    # recognisable as a no-op instead of another iteration's worth of budget.
+    feature_fit_hash: str = ""
     iteration: int = 0
     primary_metric: str = ""
     primary_metric_value: float | None = None
