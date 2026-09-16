@@ -467,6 +467,72 @@ def web(
     )
 
 
+#: Families whose backend is not on a bare Databricks runtime. An ML runtime
+#: carries them; a plain one does not, and `requires_pip` then installs them
+#: per run -- which works, but on an existing cluster the install is
+#: cluster-scoped and accumulates.
+_NEEDS_ML_RUNTIME = ("sasrec", "xgboost_*", "lightgbm_*")
+
+
+def _existing_cluster_report(settings: Any, cluster_id: str) -> str:
+    """What running on ``cluster_id`` actually costs you, read off the cluster.
+
+    Deliberately specific rather than a blanket refusal. Pinning a cluster is a
+    choice an operator is entitled to make -- a warm cluster skips the ~4.5
+    minutes a job cluster spends starting, which across a twelve-iteration
+    campaign is an hour. What it costs is real but narrower than "no tags":
+    static cluster tags *do* reach `system.billing.usage.custom_tags`; what
+    cannot be there are the per-run dimensions, because they vary per run.
+    """
+    from amt.databricks.client import get_workspace_client
+
+    cluster = get_workspace_client(settings).clusters.get(cluster_id=cluster_id)
+    tags = dict(cluster.custom_tags or {})
+    runtime = str(cluster.spark_version or "")
+    workers = int(cluster.num_workers or 0)
+    single_node = tags.get("ResourceClass") == "SingleNode"
+
+    notes = [
+        f"AMT_EXISTING_CLUSTER_ID={cluster_id} ({cluster.cluster_name}):",
+        f"  {runtime}, {cluster.node_type_id}, "
+        + ("single node" if single_node else f"{workers} worker(s)"),
+    ]
+
+    # What the operator asked about: is this attributable at all?
+    if tags.get("amt"):
+        notes.append(
+            f"+ tagged amt={tags['amt']}, so its cost IS attributable to AMT in "
+            "system.billing.usage.custom_tags"
+        )
+    else:
+        notes.append(
+            "- no amt tag: its cost is indistinguishable from anything else run "
+            "on this cluster. Add a cluster tag amt=true"
+        )
+    # What a static tag structurally cannot do, whatever it is set to.
+    notes.append(
+        "- per-run tags (amt_campaign_id, amt_role, amt_hypothesis_id) cannot "
+        "live on a shared cluster, so cost is not attributable per campaign, "
+        "role or hypothesis"
+    )
+    notes.append("- billed as All-Purpose, roughly twice the Jobs Compute rate")
+
+    if "-ml-" not in runtime:
+        notes.append(
+            f"- {runtime} is not an ML runtime: the booster and sequence families "
+            f"({', '.join(_NEEDS_ML_RUNTIME)}) are installed per run instead, "
+            "and on an existing cluster those installs are cluster-scoped and "
+            "accumulate (see scripts/clear_cluster_wheels.py)"
+        )
+    if single_node or workers == 0:
+        notes.append(
+            "- single node: fine for the boosters, which fit on one machine, but "
+            "materialization shuffles the whole source through Spark -- the "
+            "62.6M-impression FYL split took 11 minutes on 1 driver + 2 workers"
+        )
+    return "\n".join(notes)
+
+
 @app.command()
 def doctor(
     tables: str = typer.Option(
@@ -481,15 +547,25 @@ def doctor(
     job that died twenty minutes in.
     """
     settings = get_settings()
-    checks: list[tuple[str, bool, str]] = []
+    #: ``(name, severity, detail)`` where severity is ok / warn / fail. A
+    #: warning is a real finding an operator may accept; only a failure exits
+    #: non-zero, because a check that blocks a choice the operator is entitled
+    #: to make just teaches them to stop running it.
+    checks: list[tuple[str, str, str]] = []
+
+    class Warn(Exception):
+        """Raised by a check that found something worth saying, not a blocker."""
 
     def check(name: str, fn: Any) -> Any:
         try:
             detail = fn()
-            checks.append((name, True, str(detail or "")))
+            checks.append((name, "ok", str(detail or "")))
             return detail
+        except Warn as warning:
+            checks.append((name, "warn", str(warning)))
+            return None
         except Exception as exc:
-            checks.append((name, False, f"{type(exc).__name__}: {exc}"))
+            checks.append((name, "fail", f"{type(exc).__name__}: {exc}"))
             return None
 
     def _auth() -> str:
@@ -519,11 +595,7 @@ def doctor(
 
         spec = settings.cluster_spec()
         if spec.get("existing_cluster_id"):
-            raise RuntimeError(
-                f"AMT_EXISTING_CLUSTER_ID={spec['existing_cluster_id']} is set: those runs "
-                "carry no job tags, so their compute is unattributable in "
-                "system.billing.usage, and they bill as All-Purpose rather than Jobs Compute"
-            )
+            raise Warn(_existing_cluster_report(settings, str(spec["existing_cluster_id"])))
         # A node type from the wrong cloud passes every local check and fails at
         # cluster launch, twenty minutes into the first campaign.
         node_type = str(spec.get("node_type_id") or "")
@@ -534,7 +606,15 @@ def doctor(
                 f"AMT_NODE_TYPE_ID={node_type!r} does not exist in this workspace "
                 f"({len(available)} types offered); it is probably from another cloud"
             )
-        return f"job cluster {node_type} x{spec.get('num_workers')}, {settings.spark_version}"
+        described = f"job cluster {node_type} x{spec.get('num_workers')}, {settings.spark_version}"
+        if "-ml-" not in settings.spark_version:
+            raise Warn(
+                f"{described}. AMT_SPARK_VERSION is not an ML runtime, so the "
+                f"booster and sequence families ({', '.join(_NEEDS_ML_RUNTIME)}) "
+                "are pip-installed on every run -- a few minutes per job. An "
+                "ML runtime carries them already."
+            )
+        return described
 
     def _mlflow() -> str:
         from amt.databricks.mlflow_client import set_tracking_uri
@@ -581,10 +661,22 @@ def doctor(
     table = Table(title="amt doctor", header_style="bold")
     for column in ("check", "", "detail"):
         table.add_column(column, overflow="fold")
-    for name, ok, detail in checks:
-        table.add_row(name, "[green]ok[/green]" if ok else "[red]FAIL[/red]", detail)
+    marks = {
+        "ok": "[green]ok[/green]",
+        "warn": "[yellow]warn[/yellow]",
+        "fail": "[red]FAIL[/red]",
+    }
+    for name, severity, detail in checks:
+        table.add_row(name, marks[severity], detail)
     console.print(table)
-    if any(not ok for _name, ok, _detail in checks):
+
+    warnings = [name for name, severity, _ in checks if severity == "warn"]
+    if warnings:
+        console.print(
+            f"[yellow]{len(warnings)} warning(s)[/yellow] — a campaign will run. "
+            "Read them and decide."
+        )
+    if any(severity == "fail" for _name, severity, _detail in checks):
         raise typer.Exit(code=1)
 
 

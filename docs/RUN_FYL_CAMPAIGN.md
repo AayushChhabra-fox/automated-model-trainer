@@ -26,11 +26,36 @@ uv run amt doctor --tables \
   pnr_prod.silver.pr_video_impressions,product_api_dev.cursor_agent.hp_dash_home_container_daily
 ```
 
-Six checks must read `ok`: auth, warehouse, volume writable, compute spec,
-MLflow, LLM structured output — plus the two tables. If `compute spec` fails,
-read what it says: an `AMT_EXISTING_CLUSTER_ID` in your shell or `.env` makes
-the run untagged and unattributable, and a node type from the wrong cloud
-(`Standard_DS3_v2` is Azure; this workspace is AWS) fails at cluster launch.
+Seven checks run: auth, warehouse, volume writable, compute spec, MLflow, LLM
+structured output, and the two tables. Only `FAIL` exits non-zero — a node type
+from the wrong cloud (`Standard_DS3_v2` is Azure; this workspace is AWS) is a
+failure, because it dies at cluster launch twenty minutes in.
+
+A `warn` is a finding you are allowed to accept. The one you will most likely
+see is `AMT_EXISTING_CLUSTER_ID` set in your shell or `.env`, which pins the
+campaign to a shared all-purpose cluster. That is a legitimate trade — a warm
+cluster skips the ~4.5 minutes a job cluster spends starting, which over a
+twelve-iteration campaign is about an hour — so `doctor` reads the cluster and
+tells you exactly what you give up rather than refusing:
+
+- If you put an `amt=true` **cluster tag** on it, its cost *is* attributable to
+  AMT in `system.billing.usage.custom_tags`. That part works.
+- What cannot work is per-run attribution. `amt_campaign_id`, `amt_role` and
+  `amt_hypothesis_id` vary per run, and a shared cluster has one static tag
+  set, so you cannot answer "what did this campaign cost" or "which hypothesis
+  burned the budget" — only "what did AMT cost in total".
+- It bills at the All-Purpose rate, roughly twice Jobs Compute.
+- If its runtime is not an **ML** runtime (`17.3.x-scala2.13` is not;
+  `15.4.x-cpu-ml-scala2.12` is), the booster families get pip-installed on
+  every run, and on a shared cluster those installs are cluster-scoped and
+  pile up. Run `scripts/clear_cluster_wheels.py` when they do.
+- If it is a **single node** (Personal Compute policy forces this), the
+  boosters are fine — they fit on one machine — but materialization pushes the
+  whole source table through Spark. The 62.6M-impression FYL split took 11
+  minutes on 1 driver + 2 workers; expect materially worse on one node.
+
+Leave `AMT_EXISTING_CLUSTER_ID` unset for a campaign whose cost you want to
+attribute. Set it when you are iterating and want the fast loop.
 
 Then confirm what you are about to spend money on:
 

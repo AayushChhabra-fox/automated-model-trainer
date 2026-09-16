@@ -43,8 +43,14 @@ def test_cost_tags_land_on_the_job_cluster() -> None:
     assert task.new_cluster.custom_tags == TAGS
 
 
-def test_an_existing_cluster_cannot_carry_the_tags_at_all() -> None:
-    """Why `.env` no longer pins one: its compute is unattributable."""
+def test_an_existing_cluster_drops_the_per_run_tags() -> None:
+    """Why pinning one costs you attribution.
+
+    A static `amt=true` cluster tag still reaches billing, so the loss is not
+    "untagged" -- it is that `amt_role` and `amt_campaign_id` vary per run and
+    have nowhere to live, leaving cost attributable to AMT but not to a
+    campaign, role or hypothesis.
+    """
     task = _task({"existing_cluster_id": "0914-091216-h6cd8ahc"}, custom_tags=TAGS)
 
     assert task.existing_cluster_id == "0914-091216-h6cd8ahc"
