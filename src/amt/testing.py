@@ -52,6 +52,12 @@ from amt.schemas.qa import Phase0Triage, QAAssessment, QADecision
 PRIMARY_METRIC = "ndcg@10"
 INTERACTIONS_TABLE = "main.amt.interactions"
 
+# `grouped_rerank` fixtures: a container rail with four visible tiles, scored
+# on the conversion label against the order the incumbent rendered.
+GROUPED_METRIC = "ndcg@4"
+IMPRESSIONS_TABLE = "main.amt.impressions"
+GROUP_KEY = ["session_id", "page_id", "parent_id"]
+
 
 def _text(messages: Any) -> str:
     if isinstance(messages, str):
@@ -102,6 +108,7 @@ class CannedResponder:
         probe_steps: int = 2,
         family: str = "sasrec",
         structural_drift_on_iteration: int = 0,
+        evaluation_mode: str = "next_item",
     ) -> None:
         self.qa_outcome: QaOutcome = qa_outcome
         self.converge_after = converge_after
@@ -113,12 +120,27 @@ class CannedResponder:
         # On this config call the Trainer asks for a wider recipe and a different
         # objective -- the ask the clamp exists to refuse.
         self.structural_drift_on_iteration = structural_drift_on_iteration
+        # `grouped_rerank` swaps the whole framing: one render per row, the
+        # logged order as the baseline, and position-bias weighting.
+        self.evaluation_mode = evaluation_mode
         self.calls: list[str] = []
         self.counts: dict[str, int] = {}
 
     def _bump(self, key: str) -> int:
         self.counts[key] = self.counts.get(key, 0) + 1
         return self.counts[key]
+
+    @property
+    def grouped(self) -> bool:
+        return self.evaluation_mode == "grouped_rerank"
+
+    @property
+    def metric(self) -> str:
+        return GROUPED_METRIC if self.grouped else PRIMARY_METRIC
+
+    @property
+    def table(self) -> str:
+        return IMPRESSIONS_TABLE if self.grouped else INTERACTIONS_TABLE
 
     def __call__(self, schema: type[BaseModel], text: str) -> BaseModel:
         self.calls.append(schema.__name__)
@@ -170,7 +192,7 @@ class CannedResponder:
             data_sources=[
                 DataSource(
                     name="interactions",
-                    table=INTERACTIONS_TABLE,
+                    table=self.table,
                     relevant_columns=["user_id", "item_id", "event_ts", "event_type"],
                     grain="one row per user-item interaction event",
                     join_keys=["user_id", "item_id"],
@@ -191,9 +213,9 @@ class CannedResponder:
             ],
             offline_metrics=[
                 MetricDef(
-                    name=PRIMARY_METRIC,
-                    definition="Normalized discounted cumulative gain at rank 10.",
-                    k=10,
+                    name=self.metric,
+                    definition="Normalized discounted cumulative gain.",
+                    k=int(self.metric.split("@")[1]),
                     implementation="harness:ndcg_at_k",
                     is_primary=True,
                     tolerance=1e-3,
@@ -205,7 +227,8 @@ class CannedResponder:
                     implementation="harness:recall_at_k",
                 ),
             ],
-            primary_offline_metric=PRIMARY_METRIC,
+            primary_offline_metric=self.metric,
+            evaluation_mode=self.evaluation_mode,  # type: ignore[arg-type]
             objective=ObjectiveFunction(
                 name="BCE(next_item_prediction)",
                 description="Binary cross-entropy over sampled negatives.",
@@ -213,9 +236,11 @@ class CannedResponder:
                 expected_product_outcome="More relevant top-of-row items, higher start rate.",
             ),
             baseline=BaselineDefinition(
-                kind="popularity",
-                name="trailing-7d popularity",
-                description="Rank by trailing 7-day start counts.",
+                kind="logged_order" if self.grouped else "popularity",
+                name="the incumbent's own order" if self.grouped else "trailing-7d popularity",
+                description="Rank by the slot the container rendered."
+                if self.grouped
+                else "Rank by trailing 7-day start counts.",
                 evaluated_with_same_contract=True,
             ),
             assumptions=assumptions,
@@ -227,8 +252,10 @@ class CannedResponder:
         self._bump("contract")
         return EvaluationContractDraft(
             dataset=DatasetDefinition(
-                source_table=INTERACTIONS_TABLE,
-                source_tables=[INTERACTIONS_TABLE],
+                source_table=self.table,
+                source_tables=[self.table],
+                group_key=GROUP_KEY if self.grouped else [],
+                position_column="item_index" if self.grouped else "",
                 filters=["event_type = 'start'"],
                 min_interactions_per_user=3,
                 snapshot_id="snap-2026-08-01",
@@ -267,9 +294,9 @@ class CannedResponder:
             ],
             metrics=[
                 MetricDef(
-                    name=PRIMARY_METRIC,
-                    definition="NDCG at rank 10 over the fixed candidate set.",
-                    k=10,
+                    name=self.metric,
+                    definition="NDCG over the fixed candidate set.",
+                    k=int(self.metric.split("@")[1]),
                     implementation="harness:ndcg_at_k",
                     is_primary=True,
                     tolerance=1e-3,
@@ -281,9 +308,11 @@ class CannedResponder:
                     implementation="harness:recall_at_k",
                 ),
             ],
-            primary_metric=PRIMARY_METRIC,
+            primary_metric=self.metric,
+            evaluation_mode=self.evaluation_mode,  # type: ignore[arg-type]
+            relevance_weighting="pbm" if self.grouped else "none",  # type: ignore[arg-type]
             acceptance_criteria=AcceptanceCriteria(
-                primary_metric=PRIMARY_METRIC,
+                primary_metric=self.metric,
                 min_absolute_improvement=0.005,
                 min_relative_improvement=0.02,
                 require_ci_excludes_zero=True,
@@ -307,9 +336,9 @@ class CannedResponder:
                 why_it_should_improve="Recent watch order carries intent the counts discard.",
                 motivating_evidence="Sessions show strong temporal adjacency between titles.",
                 experiment_design="Train SASRec on the frozen train split; compare on validation.",
-                metric_expected_to_improve=PRIMARY_METRIC,
+                metric_expected_to_improve=self.metric,
                 falsification_criteria=(
-                    f"No meaningful {PRIMARY_METRIC} gain over the popularity baseline, "
+                    f"No meaningful {self.metric} gain over the incumbent, "
                     "or a cold-start regression."
                 ),
                 family=self.family,
@@ -329,7 +358,7 @@ class CannedResponder:
             hypothesis_summary="Sequential modeling beats popularity for top-of-row ranking.",
             rationale="Tests whether order-aware context adds signal beyond frequency.",
             expected_effect="+0.02 to +0.05 NDCG@10 on validation.",
-            primary_metric=PRIMARY_METRIC,
+            primary_metric=self.metric,
             secondary_metrics=["recall@10", "coverage"],
             permitted_model_changes=["hidden_dim", "num_layers", "heads", "dropout"],
             permitted_feature_changes=["recency", "metadata"],
@@ -338,7 +367,7 @@ class CannedResponder:
                 "num_layers": [2, 3],
                 "learning_rate": [1e-4, 3e-4],
             },
-            success_criteria=f"+0.01 absolute {PRIMARY_METRIC} over baseline on validation.",
+            success_criteria=f"+0.01 absolute {self.metric} over baseline on validation.",
             falsification_criteria="No improvement after 3 informed iterations.",
             max_iterations=3,
             compute_budget_minutes=60.0,
@@ -346,6 +375,31 @@ class CannedResponder:
         )
 
     def _recipe(self, revision: int = 1, extra: list[FeatureTransform] | None = None):
+        if self.grouped:
+            # Impression grain: the candidates and the label are on the render
+            # row, so there is nothing to generate and nothing to sample.
+            return FeatureRecipe(
+                sources=[RecipeSource(name="impressions", role="interactions", split="train")],
+                feature_columns=[
+                    FeatureTransform(
+                        name="item_popularity", kind="count", of="item_id", over="train"
+                    ),
+                    FeatureTransform(name="item_rank", kind="column", source="item_train_rank"),
+                    *(extra or []),
+                ],
+                label=LabelSpec(
+                    strategy="label_column",
+                    source_column="conversion_flag",
+                    positive_values=[True],
+                    definition="playback started within 90s of the click",
+                ),
+                group_key="group_id",
+                candidate_generation=CandidateGeneration(strategy="logged_impressions", n=1),
+                leakage_notes=(
+                    "The logged slot is never an inference-time input; only train-window "
+                    "item statistics and the candidate's own attributes are."
+                ),
+            )
         return FeatureRecipe(
             sources=[
                 RecipeSource(name="interactions", role="interactions", split="train"),
@@ -583,6 +637,7 @@ def mock_stack(
     n_hypotheses: int = 1,
     family: str = "sasrec",
     structural_drift_on_iteration: int = 0,
+    evaluation_mode: str = "next_item",
 ) -> tuple[LocalMockExecutor, Callable[[str], FakeLLM], CannedResponder]:
     """``(executor, llm_factory, responder)`` configured consistently for a dry run."""
     responder = CannedResponder(
@@ -591,6 +646,7 @@ def mock_stack(
         n_hypotheses=n_hypotheses,
         family=family,
         structural_drift_on_iteration=structural_drift_on_iteration,
+        evaluation_mode=evaluation_mode,
     )
     executor = LocalMockExecutor(
         qa_outcome=qa_outcome,

@@ -389,7 +389,7 @@ def test_result_payload_carries_contract_and_harness_stamps(tmp_path):
     _write(tmp_path, _interactions())
     result = materialize(_contract(tmp_path), output_dir=str(tmp_path))
     assert result["contract_hash"] == "abc123"
-    assert result["harness_version"] == "1.0.0"
+    assert result["harness_version"] == "1.1.0"
     assert result["status"] == "success"
     # Must round-trip as the result.json artifact.
     assert json.loads(json.dumps(result, default=str))["backend"] == "local"

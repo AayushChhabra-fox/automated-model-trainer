@@ -14,9 +14,10 @@ from amt.schemas.evaluation_contract import (
     AcceptanceCriteria,
     DatasetDefinition,
     EvaluationContract,
+    RelevanceWeighting,
     SplitPolicy,
 )
-from amt.schemas.problem_spec import ProbeObservation, ProblemSpec
+from amt.schemas.problem_spec import EvaluationMode, ProbeObservation, ProblemSpec
 from amt.settings import Settings
 
 ProbeAction = Literal["describe_table", "profile", "sample", "done"]
@@ -58,6 +59,11 @@ class EvaluationContractDraft(AmtModel):
     cohorts: list[CohortDef] = Field(default_factory=list)
     metrics: list[MetricDef] = Field(default_factory=list)
     primary_metric: str
+    # Carried from the ProblemSpec rather than re-decided: the mode and the
+    # weighting are the framing a human approved at HC2, and a contract that
+    # quietly changed either would be scoring a different question.
+    evaluation_mode: EvaluationMode = "next_item"
+    relevance_weighting: RelevanceWeighting = "none"
     acceptance_criteria: AcceptanceCriteria
 
 
@@ -109,6 +115,8 @@ def draft_to_contract(
         cohorts=draft.cohorts,
         metrics=metrics,
         primary_metric=draft.primary_metric,
+        evaluation_mode=draft.evaluation_mode,
+        relevance_weighting=draft.relevance_weighting,
         harness_version=harness_version,
         acceptance_criteria=criteria,
     )

@@ -18,14 +18,32 @@ from amt.schemas.common import (
     MetricDef,
     SplitRef,
     is_harness_metric,
+    is_secondary_only_metric,
     new_id,
     stable_hash,
     utcnow,
 )
+from amt.schemas.problem_spec import EvaluationMode
 
-HARNESS_VERSION = "1.0.0"
+# Mirrors `amt.jobs.eval.harness.HARNESS_VERSION`; a unit test asserts they
+# agree. The contracts must not import the job runtime.
+HARNESS_VERSION = "1.1.0"
 
 SplitStrategy = Literal["temporal", "leave_last_n"]
+
+#: How a conversion's relevance is weighted.
+#:
+#: ``none`` -- every conversion counts 1. Correct for `next_item`, and rigged
+#: for a container: on the proving rail slot 0 converts at 29-51 % and slots
+#: 1-3 at 5/2/1 %, so a ranker that copies the logged order scores almost
+#: perfectly and any change reads as a regression.
+#:
+#: ``pbm`` -- a position-based model. Materialization estimates the examination
+#: propensity of each slot from the *train* split, and a conversion's gain
+#: becomes ``1 / max(theta_slot, propensity_floor)``. This corrects for *where*
+#: an item was shown, not for *which* items the incumbent chose to show; the
+#: report says so.
+RelevanceWeighting = Literal["none", "pbm"]
 
 # A boundary is quoted into SQL as a literal and compared against the source's
 # timestamp column, so it has to *be* the instant: a date, a date and time with
@@ -84,6 +102,15 @@ class DatasetDefinition(AmtModel):
     )
     source_tables: list[str] = Field(
         default_factory=list, description="Every upstream table the dataset derives from."
+    )
+    # `grouped_rerank` only: what makes one render one evaluation unit, and
+    # where the incumbent's order is recorded.
+    group_key: list[str] = Field(
+        default_factory=list,
+        description="Columns that together identify one render. Executed verbatim.",
+    )
+    position_column: str = Field(
+        default="", description="Column holding the incumbent's slot for the row."
     )
     snapshot_id: str = Field(description="Immutable snapshot identifier.")
     dataset_version: str = Field(description="Delta version / materialization id.")
@@ -185,6 +212,14 @@ class EvaluationContract(AmtModel):
     cohorts: list[CohortDef] = Field(default_factory=list)
     metrics: list[MetricDef] = Field(default_factory=list)
     primary_metric: str
+    evaluation_mode: EvaluationMode = "next_item"
+    relevance_weighting: RelevanceWeighting = "none"
+    propensity_floor: float = Field(
+        default=0.02,
+        gt=0.0,
+        le=1.0,
+        description="Lower bound on an examination propensity; caps the weight at 1/floor.",
+    )
     harness_version: str = HARNESS_VERSION
     acceptance_criteria: AcceptanceCriteria
     invariants: list[str] = Field(
@@ -215,6 +250,48 @@ class EvaluationContract(AmtModel):
                 f"the harness cannot compute {unknown}; metrics must be named "
                 f"'{{recall|ndcg|hitrate|mrr|coverage}}@k', e.g. 'ndcg@10'"
             )
+        if is_secondary_only_metric(self.primary_metric):
+            raise ValueError(
+                f"{self.primary_metric!r} is a pointwise metric and may only be a "
+                "secondary: the primary metric has to be the one that reorders the "
+                "container, and a better AUC over impressions does not"
+            )
+        pointwise = sorted(n for n in names if is_secondary_only_metric(n))
+        if pointwise and self.evaluation_mode != "grouped_rerank":
+            raise ValueError(
+                f"{pointwise} need a label on every candidate, which only "
+                "evaluation_mode 'grouped_rerank' provides"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _grouped_rerank_needs_a_group(self) -> EvaluationContract:
+        """A grouped evaluation with no group key has nothing to group by.
+
+        These two fields are executed verbatim by materialization, which runs
+        on a bare cluster: a missing one is a job that dies after the wheel
+        upload rather than a contract a human can fix at HC3.
+        """
+        if self.evaluation_mode != "grouped_rerank":
+            if self.relevance_weighting != "none":
+                raise ValueError(
+                    "relevance_weighting is a property of a grouped evaluation; "
+                    "there are no slots to de-bias when ranking a whole catalog"
+                )
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("dataset.group_key", self.dataset.group_key),
+                ("dataset.position_column", self.dataset.position_column),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"evaluation_mode 'grouped_rerank' requires {missing}: one render is "
+                "one evaluation unit, and the incumbent's order is the baseline"
+            )
         return self
 
     @property
@@ -241,6 +318,12 @@ class SplitMaterialization(AmtModel):
     train: SplitRef
     validation: SplitRef
     qa: SplitRef
+    # Examination propensities under `relevance_weighting: pbm`, keyed
+    # ``"{client}|{slot}"``. Estimated from the train split only, so they are
+    # part of the frozen ground truth rather than something QA can re-derive
+    # from the split it is judging -- and printed in the report, because a
+    # de-biasing nobody can inspect is a de-biasing nobody should trust.
+    propensities: dict[str, float] = Field(default_factory=dict)
     materialized_at: datetime = Field(default_factory=utcnow)
     job_run_id: str | None = None
 

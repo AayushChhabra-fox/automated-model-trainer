@@ -170,12 +170,62 @@ def _recipe_params(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _evaluate_frame(model, frame, ks: Sequence[int], catalog_size: int, k_max: int):
-    ranked = model.recommend(frame.histories, k_max)
+    """Rank the frame's units and score them, in whichever mode the frame is in.
+
+    In ``grouped_rerank`` the model is handed the closed candidate set and the
+    incumbent's slots, the truth weights come off the split, and the catalog
+    ``coverage@k`` divides by is the distinct impressed set rather than the
+    train catalog -- a re-ranker cannot surface an item nobody showed.
+    """
+    if frame.grouped:
+        ranked = model.recommend(
+            frame.histories, k_max, candidates=frame.candidates, positions=frame.positions
+        )
+        catalog_size = frame.distinct_candidates or catalog_size
+        gains = frame.gains
+    else:
+        ranked = model.recommend(frame.histories, k_max)
+        gains = None
     result = evaluate(
-        ranked, frame.truths, ks=ks, catalog_size=catalog_size, include_per_user=True
+        ranked,
+        frame.truths,
+        ks=ks,
+        catalog_size=catalog_size,
+        include_per_user=True,
+        gains=gains,
     )
     per_user = result.pop("per_user")
+    if frame.grouped:
+        result.update(_pointwise(model, frame))
     return result, per_user, ranked
+
+
+def _pointwise(model, frame) -> dict[str, float]:
+    """``auc`` / ``pr_auc`` / ``logloss`` / ``ece`` over every scored candidate.
+
+    Only possible in ``grouped_rerank``, where every candidate carries a label.
+    A ranking metric over a three-item candidate set can look healthy while the
+    scores separate nothing; these say whether they do.
+    """
+    from amt.jobs.eval.harness import binary_metrics
+
+    scorer = getattr(model, "score", None)
+    if scorer is None or not frame.candidates:
+        return {}
+    try:
+        scores, _groups, items = scorer(frame.histories, frame.candidates)
+    except Exception:  # pragma: no cover - a family that cannot score candidates
+        return {}
+    if len(items) != len(scores):
+        return {}
+    labels = [
+        1.0 if item in truth else 0.0
+        for truth, row in zip(frame.truths, frame.candidates, strict=True)
+        for item in row
+    ]
+    if len(labels) != len(scores):
+        return {}
+    return binary_metrics(scores, labels)
 
 
 def train_and_evaluate(

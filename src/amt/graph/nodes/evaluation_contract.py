@@ -98,6 +98,10 @@ def make_run_baseline_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         update: dict = {
             "stage": Stage.BASELINE.value,
             "baseline_run_id": result.mlflow_run_id,
+            # Kept in state, not just MLflow: HC_CHAMPION and the Planner both
+            # need something to compare a champion against, and "beats the
+            # incumbent" is the only comparison that means anything.
+            "baseline_metrics": dict(result.validation_metrics or {}),
         }
         if deps.use_mlflow and not state.get("mlflow_experiment_id"):
             from amt.databricks.mlflow_client import get_or_create_experiment

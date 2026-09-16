@@ -11,13 +11,35 @@ from amt.schemas.common import (
     AmtModel,
     MetricDef,
     is_harness_metric,
+    is_secondary_only_metric,
     new_id,
     stable_hash,
     utcnow,
 )
 
 Measurability = Literal["offline", "offline_proxy", "simulated", "online_only"]
-BaselineKind = Literal["production_model", "existing_model", "heuristic", "popularity", "other"]
+BaselineKind = Literal[
+    "production_model",
+    "existing_model",
+    "heuristic",
+    "popularity",
+    # The order the container actually rendered: the incumbent ranker itself,
+    # available only in `grouped_rerank` mode where the log carries positions.
+    "logged_order",
+    "other",
+]
+
+#: What one evaluation unit is.
+#:
+#: ``next_item``      -- one user, ranked against the whole catalog, judged on
+#:                       the items they interacted with after the boundary.
+#: ``grouped_rerank`` -- one render of one container, ranked against the items
+#:                       that render actually showed, judged on the conversion
+#:                       label, against the order the incumbent chose.
+#:
+#: The distinction is not cosmetic: the second is the product question for a
+#: container, and the first cannot express it at all.
+EvaluationMode = Literal["next_item", "grouped_rerank"]
 
 
 class ProblemDescription(AmtModel):
@@ -87,6 +109,7 @@ class ProblemSpec(AmtModel):
     product_metrics: list[ProductMetric] = Field(default_factory=list)
     offline_metrics: list[MetricDef] = Field(default_factory=list)
     primary_offline_metric: str
+    evaluation_mode: EvaluationMode = "next_item"
     objective: ObjectiveFunction
     baseline: BaselineDefinition
     investigation_notes: list[ProbeObservation] = Field(default_factory=list)
@@ -100,10 +123,20 @@ class ProblemSpec(AmtModel):
         # Product metrics stay in product language; the offline metric the
         # campaign optimizes has to be one the harness computes, or the
         # contract derived from this spec could never be evaluated.
-        if not is_harness_metric(self.primary_offline_metric):
+        if not is_harness_metric(self.primary_offline_metric, primary=True):
+            detail = (
+                "it is a pointwise metric, admissible only as a secondary: a better "
+                "AUC over impressions does not reorder a container"
+                if is_secondary_only_metric(self.primary_offline_metric)
+                else "primary_offline_metric must be '{recall|ndcg|hitrate|mrr|coverage}@k'"
+            )
             raise ValueError(
-                f"the harness cannot compute {self.primary_offline_metric!r}; "
-                "primary_offline_metric must be '{recall|ndcg|hitrate|mrr|coverage}@k'"
+                f"{self.primary_offline_metric!r} cannot be the primary metric: {detail}"
+            )
+        if self.baseline.kind == "logged_order" and self.evaluation_mode != "grouped_rerank":
+            raise ValueError(
+                "baseline kind 'logged_order' needs evaluation_mode 'grouped_rerank'; "
+                "there is no logged order to beat when ranking the whole catalog"
             )
         return self
 

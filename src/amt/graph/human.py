@@ -27,6 +27,10 @@ class HumanDecision(AmtModel):
         description="Hypothesis ids to keep; anything else under review is abandoned.",
     )
     drop: list[str] = Field(default_factory=list, description="Hypothesis ids to abandon.")
+    freeze: bool = Field(
+        default=False,
+        description="At HC_CHAMPION: stop exploring and take this champion to QA.",
+    )
 
 
 def _ids(value: Any) -> list[str]:
@@ -63,6 +67,7 @@ def parse_resume(payload: Any) -> HumanDecision:
             decision=payload.get("decision"),
             keep=_ids(payload.get("keep")),
             drop=_ids(payload.get("drop")),
+            freeze=bool(payload.get("freeze", False)),
         )
     raise TypeError(f"Unsupported resume payload: {type(payload).__name__}")
 

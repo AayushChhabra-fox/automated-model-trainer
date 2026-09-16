@@ -25,8 +25,23 @@ def resume(graph, config, **payload):
     return pending_interrupt(graph, config)
 
 
+def through_champions(graph, config, payload: dict | None = None, limit: int = 8):
+    """Answer every HC_CHAMPION review, and return the checkpoint after them.
+
+    The champion gate is per hypothesis and on by default, so a campaign with
+    three hypotheses stops three times here. Tests that are not about the gate
+    wave it through; the ones that are pass a payload.
+    """
+    checkpoint = pending_interrupt(graph, config)
+    for _ in range(limit):
+        if not checkpoint or checkpoint["checkpoint"] != "HC_CHAMPION":
+            return checkpoint
+        checkpoint = resume(graph, config, **(payload or {"approved": True}))
+    raise AssertionError("HC_CHAMPION kept interrupting; the loop is not converging")
+
+
 def run_to_hc4(graph, config, campaign_id="test-campaign"):
-    """HC1 → HC2 (reject, then approve) → HC3 → HC_BACKLOG → autonomous → HC4."""
+    """HC1 → HC2 (reject, then approve) → HC3 → HC_BACKLOG → HC_CHAMPION* → HC4."""
     hc2 = start(graph, config, campaign_id)
     assert hc2 and hc2["checkpoint"] == "HC2"
 
@@ -39,8 +54,8 @@ def run_to_hc4(graph, config, campaign_id="test-campaign"):
     backlog = resume(graph, config, approved=True)
     assert backlog and backlog["checkpoint"] == "HC_BACKLOG"
 
-    hc4 = resume(graph, config, approved=True)
-    return hc4
+    resume(graph, config, approved=True)
+    return through_champions(graph, config)
 
 
 # --- happy path ----------------------------------------------------------------------
@@ -130,6 +145,7 @@ def test_contract_hash_is_constant_for_the_whole_campaign(campaign):
     stamped_at_hc3 = graph_state(graph, config)["evaluation_contract"].contract_hash
     resume(graph, config, approved=True)  # HC_BACKLOG
     resume(graph, config, approved=True)
+    through_champions(graph, config)
 
     state = graph_state(graph, config)
     assert state["contract_hash"] == stamped_at_hc3
@@ -309,7 +325,8 @@ def run_tabular_to_hc4(graph, config, campaign_id="test-campaign", reject_first_
     if reject_first_shape:
         hc_feature = resume(graph, config, approved=False, feedback="drop the leaky feature")
         assert hc_feature and hc_feature["checkpoint"] == "HC_FEATURE"
-    return resume(graph, config, approved=True), hc_feature
+    resume(graph, config, approved=True)
+    return through_champions(graph, config), hc_feature
 
 
 def test_a_booster_campaign_must_pass_the_feature_checkpoint_before_training(campaign):
@@ -368,8 +385,10 @@ def test_the_fixed_shape_families_never_reach_the_feature_checkpoint(campaign):
     assert hc2["checkpoint"] == "HC2"
     assert resume(graph, config, approved=True)["checkpoint"] == "HC3"
     assert resume(graph, config, approved=True)["checkpoint"] == "HC_BACKLOG"
-    # Straight from the backlog to the conclusion: one interrupt, not two.
-    assert resume(graph, config, approved=True)["checkpoint"] == "HC4"
+    # Straight from the backlog into the trainer loop: no shape gate at all,
+    # then one champion review per hypothesis.
+    resume(graph, config, approved=True)
+    assert through_champions(graph, config)["checkpoint"] == "HC4"
 
     assert "feature_fit" not in responder.counts
     state = graph_state(graph, config)
@@ -400,9 +419,13 @@ def test_one_review_covers_every_shape_and_the_checklist_strikes_out_the_rest(ca
     assert sorted(shapes["shapes"]) == ["hyp-1", "hyp-2"], "the dropped one is not proposed for"
     assert responder.counts["feature_fit"] == 2, "one proposal per surviving hypothesis"
 
-    # Strike hyp-2's shape; only hyp-1 gets compute. The next stop is HC4.
-    hc4 = resume(graph, config, approved=True, keep=["hyp-1"])
-    assert hc4 and hc4["checkpoint"] == "HC4", "exactly two interrupts between HC3 and HC4"
+    # Strike hyp-2's shape; only hyp-1 gets compute, so there is exactly one
+    # champion to review and then the conclusion.
+    champion = resume(graph, config, approved=True, keep=["hyp-1"])
+    assert champion and champion["checkpoint"] == "HC_CHAMPION"
+    assert champion["hypothesis_id"] == "hyp-1"
+    hc4 = resume(graph, config, approved=True)
+    assert hc4 and hc4["checkpoint"] == "HC4", "two shape gates and one champion review"
 
     state = graph_state(graph, config)
     assert {h.hypothesis_id: h.status for h in state["hypotheses"]} == {
@@ -425,6 +448,165 @@ def test_one_review_covers_every_shape_and_the_checklist_strikes_out_the_rest(ca
         "smuggled_bias" not in {t.name for t in c.feature_recipe.feature_columns}
         for c in executor.training_configs
     )
+
+
+# --- grouped re-ranking: the container's own question -----------------------------------------
+def test_a_grouped_rerank_campaign_runs_against_its_logged_incumbent(campaign):
+    """One render per unit, the logged order as the baseline, pbm weighting.
+
+    The same skeleton as every other campaign -- the mode is a property of the
+    contract, not a second pipeline.
+    """
+    graph, config, executor, responder = campaign(
+        family="lightgbm_reranker", evaluation_mode="grouped_rerank", converge_after=1
+    )
+
+    hc4, shape = run_tabular_to_hc4(graph, config)
+    assert hc4 and hc4["checkpoint"] == "HC4"
+
+    state = graph_state(graph, config)
+    contract = state["evaluation_contract"]
+    assert contract.evaluation_mode == "grouped_rerank"
+    assert contract.primary_metric == "ndcg@4"
+    assert contract.dataset.group_key == ["session_id", "page_id", "parent_id"]
+    assert contract.dataset.position_column == "item_index"
+
+    # The baseline is the incumbent, not a popularity model.
+    assert state["problem_spec"].baseline.kind == "logged_order"
+    # Candidates come off the render row, so there is no `n` to blow up.
+    recipe = shape["shapes"]["hyp-1"]["feature_recipe"]
+    assert recipe["candidate_generation"]["strategy"] == "logged_impressions"
+    assert recipe["label"]["source_column"] == "conversion_flag"
+
+    # The weighting is frozen into the contract hash, so the baseline, every
+    # candidate and QA are scored under the same one.
+    assert contract.relevance_weighting == "pbm"
+    assert state["split_materialization"].propensities["ROKU|1"] < 1.0
+    assert state["qa_decision"] is QADecision.PASS
+
+
+def test_a_pointwise_metric_cannot_be_the_primary(responder):
+    """A better AUC over impressions does not reorder a container."""
+    from pydantic import ValidationError
+
+    from amt.schemas.problem_spec import ProblemSpec
+
+    spec = responder(ProblemSpec, "")
+    payload = spec.model_dump()
+    payload["primary_offline_metric"] = "auc"
+
+    with pytest.raises(ValidationError, match="only as a secondary"):
+        ProblemSpec.model_validate(payload)
+
+
+def test_a_grouped_contract_without_a_group_key_is_refused(evaluation_contract):
+    from pydantic import ValidationError
+
+    from amt.schemas.evaluation_contract import EvaluationContract
+
+    payload = evaluation_contract.model_dump()
+    payload["evaluation_mode"] = "grouped_rerank"
+
+    with pytest.raises(ValidationError, match="group_key"):
+        EvaluationContract.model_validate(payload)
+
+
+# --- HC_CHAMPION: one review per hypothesis ---------------------------------------------------
+def run_to_first_champion(graph, config, **kwargs):
+    """Drive a SASRec campaign to its first HC_CHAMPION review."""
+    assert start(graph, config)["checkpoint"] == "HC2"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC3"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC_BACKLOG"
+    return resume(graph, config, approved=True)
+
+
+def test_each_hypothesis_champion_is_reviewed_once_before_the_next_one_runs(campaign):
+    graph, config, executor, responder = campaign(n_hypotheses=3, converge_after=1)
+
+    first = run_to_first_champion(graph, config)
+    assert first["checkpoint"] == "HC_CHAMPION"
+    assert first["hypothesis_id"] == "hyp-1"
+    assert first["hypotheses_remaining"] == ["hyp-2", "hyp-3"]
+    assert first["budget"]["hypotheses_remaining"] >= 1
+
+    second = resume(graph, config, approved=True)
+    assert second["checkpoint"] == "HC_CHAMPION" and second["hypothesis_id"] == "hyp-2"
+    third = resume(graph, config, approved=True)
+    assert third["checkpoint"] == "HC_CHAMPION" and third["hypothesis_id"] == "hyp-3"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC4"
+
+    state = graph_state(graph, config)
+    assert len(state["hypothesis_champions"]) == 3
+    assert state["gate_cycles"] == 0, "approvals are not bounces"
+
+
+def test_the_review_compares_the_champion_against_the_baseline_and_its_predecessors(campaign):
+    graph, config, executor, responder = campaign(n_hypotheses=2, converge_after=1)
+
+    first = run_to_first_champion(graph, config)
+    labels = [row["label"] for row in first["comparison"]]
+    assert labels == ["baseline", "hyp-1"], "a champion's number means nothing alone"
+    assert first["comparison"][0]["metrics"], "the baseline's metrics reached state"
+
+    second = resume(graph, config, approved=True)
+    assert [row["label"] for row in second["comparison"]] == ["baseline", "hyp-1", "hyp-2"]
+
+
+def test_freeze_skips_the_rest_of_the_backlog(campaign):
+    """ "Good enough" has to be expressible without abandoning the campaign."""
+    graph, config, executor, responder = campaign(n_hypotheses=3, converge_after=1)
+
+    first = run_to_first_champion(graph, config)
+    assert first["checkpoint"] == "HC_CHAMPION"
+    hc4 = resume(graph, config, approved=True, freeze=True)
+
+    assert hc4 and hc4["checkpoint"] == "HC4"
+    state = graph_state(graph, config)
+    assert len(state["hypothesis_champions"]) == 1, "hyp-2 and hyp-3 never ran"
+    assert {h.hypothesis_id: h.status for h in state["hypotheses"]} == {
+        "hyp-1": "converged",
+        "hyp-2": "abandoned",
+        "hyp-3": "abandoned",
+    }
+    assert state["frozen_champion"].hypothesis_id == "hyp-1"
+
+
+def test_dropping_a_hypothesis_at_the_review_skips_only_that_one(campaign):
+    graph, config, executor, responder = campaign(n_hypotheses=3, converge_after=1)
+
+    run_to_first_champion(graph, config)
+    third = resume(graph, config, approved=True, drop=["hyp-2"])
+
+    assert third["checkpoint"] == "HC_CHAMPION" and third["hypothesis_id"] == "hyp-3"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC4"
+    statuses = {h.hypothesis_id: h.status for h in graph_state(graph, config)["hypotheses"]}
+    assert statuses == {"hyp-1": "converged", "hyp-2": "abandoned", "hyp-3": "converged"}
+
+
+def test_a_rehearsal_campaign_can_turn_the_review_off(campaign, settings):
+    """`--no-gate-champions` is for dry runs, not for real ones."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from amt.graph.build import build_graph
+    from amt.testing import mock_stack
+
+    executor, llm_factory, responder = mock_stack(n_hypotheses=2, converge_after=1)
+    graph = build_graph(
+        executor=executor,
+        llm_factory=llm_factory,
+        settings=settings,
+        checkpointer=MemorySaver(),
+        use_mlflow=False,
+        gate_champions=False,
+    )
+    config = {"configurable": {"thread_id": "no-gate"}, "recursion_limit": 150}
+
+    assert start(graph, config, "no-gate")["checkpoint"] == "HC2"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC3"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC_BACKLOG"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC4"
+
+    assert len(graph_state(graph, config)["hypothesis_champions"]) == 2
 
 
 def test_striking_out_every_shape_spends_nothing_and_freezes_nothing(campaign):

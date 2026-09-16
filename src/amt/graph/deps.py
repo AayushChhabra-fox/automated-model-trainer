@@ -24,6 +24,10 @@ class NodeDeps:
     sql_probe: Any | None = None
     use_mlflow: bool = False
     code_version: str = ""
+    #: Whether HC_CHAMPION interrupts. On by default; a rehearsal campaign
+    #: turns it off with `--no-gate-champions` so a dry run does not need a
+    #: human at every hypothesis boundary.
+    gate_champions: bool = True
 
     @cached_property
     def problem_spec_agent(self) -> ProblemSpecAgent:

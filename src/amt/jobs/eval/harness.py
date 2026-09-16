@@ -10,26 +10,39 @@ Everything here is pure ``numpy``: no Spark, no torch, no MLflow.
 
 Conventions
 -----------
-``ranked``  : ``list[list[int]]`` -- per user, item ids ordered best-first.
-``truth``   : ``list[set[int]]``  -- per user, the relevant (held-out) items.
-Users whose truth set is empty are excluded from the averages but still
-appear (as ``nan``) in the per-user arrays so that arrays stay aligned with
+``ranked``  : ``list[list[int]]`` -- per unit, item ids ordered best-first.
+``truth``   : ``list[set[int]]``  -- per unit, the relevant (held-out) items.
+``gains``   : ``list[dict[int, float]]`` -- optional per-unit relevance weight
+              of each truth item. ``None`` means every hit counts 1, which is
+              what every metric below reduces to.
+Units whose truth set is empty are excluded from the averages but still
+appear (as ``nan``) in the per-unit arrays so that arrays stay aligned with
 the input order.
+
+A "unit" is a user in ``next_item`` mode and one render of a container in
+``grouped_rerank`` mode. Nothing here knows the difference: the inputs are a
+ranked list and a truth set, and a render is both.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
-HARNESS_VERSION = "1.0.0"
+#: 1.1.0, not 1.0.0: `evaluate` grew a `gains` argument, and every metric's
+#: unweighted result is byte-identical (a unit test pins that), so campaigns
+#: already in flight compare cleanly. The version still moves, because the
+#: contract asserts it and a reader deserves to know which harness ran.
+HARNESS_VERSION = "1.1.0"
 
 DEFAULT_KS: tuple[int, ...] = (5, 10, 20)
 
 __all__ = [
     "DEFAULT_KS",
     "HARNESS_VERSION",
+    "binary_metrics",
     "evaluate",
     "hitrate_at_k",
     "item_coverage",
@@ -46,44 +59,76 @@ __all__ = [
 # --------------------------------------------------------------------------
 
 
-def _as_hit_matrix(
+class _Hits:
+    """Per-unit gains of the top-k hits, plus the totals each metric divides by.
+
+    ``matrix[i, j]`` is the gain of the item ranked ``j`` for unit ``i``, or 0
+    when it is not relevant. With no weighting every gain is 1.0 and the
+    fields below collapse to counts, which is why every metric reduces exactly
+    to its unweighted form.
+    """
+
+    __slots__ = ("best", "ideal", "matrix", "n_truth", "total", "valid")
+
+    def __init__(
+        self,
+        matrix: np.ndarray,
+        total: np.ndarray,
+        best: np.ndarray,
+        ideal: np.ndarray,
+        n_truth: np.ndarray,
+    ) -> None:
+        self.matrix = matrix
+        self.total = total  # sum of every truth gain
+        self.best = best  # largest single truth gain
+        self.ideal = ideal  # DCG of the best achievable ordering
+        self.n_truth = n_truth
+        self.valid = n_truth > 0
+
+
+def _as_hits(
     ranked: Sequence[Sequence[int]],
     truth: Sequence[Iterable[int]],
     k: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return ``(hits, n_truth, valid)``.
-
-    ``hits`` is a ``(n_users, k)`` float array, 1.0 where the ranked item at
-    that position is in the user's truth set.  Positions beyond the length of
-    a short ranked list are 0.  ``n_truth`` is the truth-set size per user and
-    ``valid`` marks users with a non-empty truth set.
-    """
+    gains: Sequence[Mapping[Any, float]] | None = None,
+) -> _Hits:
     if len(ranked) != len(truth):
-        raise ValueError(
-            f"ranked/truth length mismatch: {len(ranked)} != {len(truth)}"
-        )
+        raise ValueError(f"ranked/truth length mismatch: {len(ranked)} != {len(truth)}")
+    if gains is not None and len(gains) != len(ranked):
+        raise ValueError(f"ranked/gains length mismatch: {len(ranked)} != {len(gains)}")
     if k <= 0:
         raise ValueError("k must be positive")
 
     n = len(ranked)
-    hits = np.zeros((n, k), dtype=np.float64)
+    matrix = np.zeros((n, k), dtype=np.float64)
+    total = np.zeros(n, dtype=np.float64)
+    best = np.zeros(n, dtype=np.float64)
+    ideal = np.zeros(n, dtype=np.float64)
     n_truth = np.zeros(n, dtype=np.float64)
+    disc = _discount(k)
 
-    for i, (rec, tru) in enumerate(zip(ranked, truth)):
+    for i, (rec, tru) in enumerate(zip(ranked, truth, strict=True)):
         tset = tru if isinstance(tru, (set, frozenset)) else set(tru)
         n_truth[i] = len(tset)
         if not tset:
             continue
-        seen: set[int] = set()
+        weights = gains[i] if gains is not None else None
+        gain_of = {item: float((weights or {}).get(item, 1.0)) for item in tset}
+        total[i] = sum(gain_of.values())
+        best[i] = max(gain_of.values())
+        # The best any ordering could do: the heaviest conversions first.
+        top = sorted(gain_of.values(), reverse=True)[:k]
+        ideal[i] = float(np.dot(top, disc[: len(top)]))
+
+        seen: set[Any] = set()
         for j, item in enumerate(rec[:k]):
             # A ranked list should not contain duplicates; if it does, only
             # the first occurrence may score (otherwise recall can exceed 1).
-            if item in tset and item not in seen:
-                hits[i, j] = 1.0
+            if item in gain_of and item not in seen:
+                matrix[i, j] = gain_of[item]
             seen.add(item)
 
-    valid = n_truth > 0
-    return hits, n_truth, valid
+    return _Hits(matrix, total, best, ideal, n_truth)
 
 
 def _discount(k: int) -> np.ndarray:
@@ -109,53 +154,76 @@ def _mean(per_user: np.ndarray) -> float:
 
 
 def recall_at_k(
-    ranked: Sequence[Sequence[int]], truth: Sequence[Iterable[int]], k: int
+    ranked: Sequence[Sequence[int]],
+    truth: Sequence[Iterable[int]],
+    k: int,
+    gains: Sequence[Mapping[Any, float]] | None = None,
 ) -> np.ndarray:
-    """Fraction of a user's relevant items retrieved in the top ``k``."""
-    hits, n_truth, valid = _as_hit_matrix(ranked, truth, k)
-    denom = np.where(valid, n_truth, 1.0)
-    return _masked(hits.sum(axis=1) / denom, valid)
+    """Share of a unit's relevance retrieved in the top ``k``.
+
+    Self-normalised: the recovered gain over the total available gain, so a
+    weighted recall is still a fraction and reduces to ``hits / |truth|``.
+    """
+    hits = _as_hits(ranked, truth, k, gains)
+    denom = np.where(hits.valid, hits.total, 1.0)
+    return _masked(hits.matrix.sum(axis=1) / denom, hits.valid)
 
 
 def hitrate_at_k(
-    ranked: Sequence[Sequence[int]], truth: Sequence[Iterable[int]], k: int
+    ranked: Sequence[Sequence[int]],
+    truth: Sequence[Iterable[int]],
+    k: int,
+    gains: Sequence[Mapping[Any, float]] | None = None,
 ) -> np.ndarray:
-    """1.0 if at least one relevant item appears in the top ``k``."""
-    hits, _n_truth, valid = _as_hit_matrix(ranked, truth, k)
-    return _masked((hits.sum(axis=1) > 0).astype(np.float64), valid)
+    """1.0 if at least one relevant item appears in the top ``k``.
+
+    Weighted, it is the best hit's gain over the best available gain: finding
+    the conversion that happened at slot 3 counts fully, and finding only the
+    easy slot-0 one when a slot-3 one existed does not.
+    """
+    hits = _as_hits(ranked, truth, k, gains)
+    denom = np.where(hits.valid, hits.best, 1.0)
+    return _masked(hits.matrix.max(axis=1) / denom, hits.valid)
 
 
 def ndcg_at_k(
-    ranked: Sequence[Sequence[int]], truth: Sequence[Iterable[int]], k: int
+    ranked: Sequence[Sequence[int]],
+    truth: Sequence[Iterable[int]],
+    k: int,
+    gains: Sequence[Mapping[Any, float]] | None = None,
 ) -> np.ndarray:
-    """Binary-gain NDCG@k with the ideal DCG of ``min(|truth|, k)`` hits."""
-    hits, n_truth, valid = _as_hit_matrix(ranked, truth, k)
-    disc = _discount(k)
-    dcg = (hits * disc).sum(axis=1)
-
-    ideal_n = np.minimum(n_truth, k).astype(int)
-    cum = np.concatenate([[0.0], np.cumsum(disc)])
-    idcg = cum[ideal_n]
-    idcg = np.where(idcg > 0, idcg, 1.0)
-    return _masked(dcg / idcg, valid)
+    """NDCG@k against the ideal ordering of whatever gains the unit carries."""
+    hits = _as_hits(ranked, truth, k, gains)
+    dcg = (hits.matrix * _discount(k)).sum(axis=1)
+    idcg = np.where(hits.ideal > 0, hits.ideal, 1.0)
+    return _masked(dcg / idcg, hits.valid)
 
 
 def mrr(
     ranked: Sequence[Sequence[int]],
     truth: Sequence[Iterable[int]],
     k: int | None = None,
+    gains: Sequence[Mapping[Any, float]] | None = None,
 ) -> np.ndarray:
-    """Reciprocal rank of the first relevant item (0 if none within ``k``)."""
+    """Reciprocal rank of the first relevant item (0 if none within ``k``).
+
+    Weighted, the reciprocal rank is scaled by that hit's share of the best
+    available gain, so ranking a low-propensity conversion first counts more.
+    """
     if k is None:
         k = max((len(r) for r in ranked), default=1) or 1
-    hits, _n_truth, valid = _as_hit_matrix(ranked, truth, k)
+    hits = _as_hits(ranked, truth, k, gains)
     ranks = np.arange(1, k + 1, dtype=np.float64)
-    rr = np.zeros(hits.shape[0], dtype=np.float64)
-    any_hit = hits.sum(axis=1) > 0
+    rr = np.zeros(hits.matrix.shape[0], dtype=np.float64)
+    any_hit = hits.matrix.sum(axis=1) > 0
     if np.any(any_hit):
-        first = np.argmax(hits[any_hit] > 0, axis=1)
-        rr[any_hit] = 1.0 / ranks[first]
-    return _masked(rr, valid)
+        rows = hits.matrix[any_hit]
+        first = np.argmax(rows > 0, axis=1)
+        share = rows[np.arange(rows.shape[0]), first] / np.where(
+            hits.best[any_hit] > 0, hits.best[any_hit], 1.0
+        )
+        rr[any_hit] = share / ranks[first]
+    return _masked(rr, hits.valid)
 
 
 def item_coverage(
@@ -186,8 +254,9 @@ def per_user_metrics(
     ranked: Sequence[Sequence[int]],
     truth: Sequence[Iterable[int]],
     ks: Sequence[int] = DEFAULT_KS,
+    gains: Sequence[Mapping[Any, float]] | None = None,
 ) -> dict[str, np.ndarray]:
-    """Per-user arrays keyed ``"{metric}@{k}"``; ``nan`` where unscoreable.
+    """Per-unit arrays keyed ``"{metric}@{k}"``; ``nan`` where unscoreable.
 
     These arrays are the input to :mod:`amt.jobs.eval.paired` and
     :mod:`amt.jobs.eval.cohorts`, so paired comparisons and cohort
@@ -195,11 +264,84 @@ def per_user_metrics(
     """
     out: dict[str, np.ndarray] = {}
     for k in ks:
-        out[f"recall@{k}"] = recall_at_k(ranked, truth, k)
-        out[f"ndcg@{k}"] = ndcg_at_k(ranked, truth, k)
-        out[f"hitrate@{k}"] = hitrate_at_k(ranked, truth, k)
-        out[f"mrr@{k}"] = mrr(ranked, truth, k)
+        out[f"recall@{k}"] = recall_at_k(ranked, truth, k, gains)
+        out[f"ndcg@{k}"] = ndcg_at_k(ranked, truth, k, gains)
+        out[f"hitrate@{k}"] = hitrate_at_k(ranked, truth, k, gains)
+        out[f"mrr@{k}"] = mrr(ranked, truth, k, gains)
     return out
+
+
+def binary_metrics(scores: Sequence[float], labels: Sequence[float]) -> dict[str, float]:
+    """Pointwise quality of the scores themselves: ``auc``, ``pr_auc``, ``logloss``, ``ece``.
+
+    These need a label on every candidate, which only ``grouped_rerank``
+    provides. They are diagnostics: they say whether the model separates
+    converters from non-converters at all, which a ranking metric can hide
+    when the candidate set is only three items long. They are never the
+    primary metric -- see ``is_secondary_only_metric``.
+
+    Returns ``{}`` when one class is absent, because none of the four means
+    anything then.
+    """
+    y = np.asarray(labels, dtype=np.float64).ravel()
+    s = np.asarray(scores, dtype=np.float64).ravel()
+    if y.size != s.size:
+        raise ValueError(f"scores/labels length mismatch: {s.size} != {y.size}")
+    keep = np.isfinite(s) & np.isfinite(y)
+    y, s = y[keep], s[keep]
+    positives = int(np.count_nonzero(y > 0))
+    if y.size == 0 or positives in (0, y.size):
+        return {}
+
+    # AUC as the rank-sum (Mann-Whitney U) statistic, so ties count as half.
+    order = np.argsort(s, kind="mergesort")
+    ranks = np.empty(s.size, dtype=np.float64)
+    ranks[order] = np.arange(1, s.size + 1, dtype=np.float64)
+    _unique, inverse, counts = np.unique(s, return_inverse=True, return_counts=True)
+    mean_rank = np.zeros(counts.size, dtype=np.float64)
+    np.add.at(mean_rank, inverse, ranks)
+    ranks = (mean_rank / counts)[inverse]
+    negatives = y.size - positives
+    auc = (ranks[y > 0].sum() - positives * (positives + 1) / 2.0) / (positives * negatives)
+
+    # Average precision: the step-wise integral of the PR curve.
+    ordered = y[np.argsort(-s, kind="mergesort")]
+    tp = np.cumsum(ordered)
+    precision = tp / np.arange(1, ordered.size + 1, dtype=np.float64)
+    pr_auc = float((precision * ordered).sum() / positives)
+
+    probability = _to_probability(s)
+    eps = 1e-12
+    logloss = float(
+        -np.mean(y * np.log(probability + eps) + (1 - y) * np.log(1 - probability + eps))
+    )
+
+    # Expected calibration error over ten equal-width probability bins.
+    bins = np.clip((probability * 10).astype(int), 0, 9)
+    ece = 0.0
+    for b in range(10):
+        mask = bins == b
+        if not np.any(mask):
+            continue
+        ece += (mask.sum() / y.size) * abs(probability[mask].mean() - y[mask].mean())
+
+    return {
+        "auc": float(auc),
+        "pr_auc": pr_auc,
+        "logloss": logloss,
+        "ece": float(ece),
+    }
+
+
+def _to_probability(scores: np.ndarray) -> np.ndarray:
+    """Scores as probabilities, squashing only when they are not already in [0, 1].
+
+    A classifier's output is a probability; a ranker's margin is not, and
+    ``logloss`` on a raw margin is meaningless rather than merely large.
+    """
+    if scores.size and scores.min() >= 0.0 and scores.max() <= 1.0:
+        return scores
+    return 1.0 / (1.0 + np.exp(-scores))
 
 
 def evaluate(
@@ -208,17 +350,23 @@ def evaluate(
     ks: Sequence[int] = DEFAULT_KS,
     catalog_size: int = 0,
     include_per_user: bool = False,
+    gains: Sequence[Mapping[Any, float]] | None = None,
 ) -> dict:
     """Compute every harness metric.
 
     Returns a flat ``{metric_name: float}`` dict.  ``coverage@k`` is a corpus
-    level metric and has no per-user array.  ``n_users`` / ``n_scored`` are
-    included so callers can tell how many users actually contributed.
+    level metric and has no per-unit array.  ``n_users`` / ``n_scored`` are
+    included so callers can tell how many units actually contributed.
     With ``include_per_user=True`` the returned dict additionally carries a
     ``"per_user"`` entry holding the raw arrays.
+
+    ``gains`` weights each unit's relevant items. Metric *names* do not change
+    when it is supplied -- ``ndcg@4`` is ``ndcg@4`` -- because the weighting is
+    a contract-level fact stamped into ``contract_hash`` and therefore
+    identical for the baseline, every candidate and QA.
     """
     ks = tuple(int(k) for k in ks)
-    per_user = per_user_metrics(ranked, truth, ks)
+    per_user = per_user_metrics(ranked, truth, ks, gains)
 
     metrics: dict[str, float] = {name: _mean(arr) for name, arr in per_user.items()}
     for k in ks:

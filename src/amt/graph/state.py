@@ -103,6 +103,11 @@ class CampaignState(TypedDict, total=False):
     convergence_reason: str
     budget: ExperimentBudget
     hypothesis_champions: list[HypothesisChampion]
+    baseline_metrics: dict[str, float]
+    # HC_CHAMPION: the operator read this hypothesis's champion, and whether
+    # they asked to stop exploring and take it to QA.
+    champion_reviewed: bool
+    freeze_requested: bool
 
     # Stage 8-10 — freeze and QA
     frozen_champion: FrozenChampion | None
@@ -175,6 +180,9 @@ def new_campaign_state(
         convergence_reason="",
         budget=budget or ExperimentBudget(),
         hypothesis_champions=[],
+        baseline_metrics={},
+        champion_reviewed=False,
+        freeze_requested=False,
         frozen_champion=None,
         qa_phase0=None,
         phase0_attempts=0,

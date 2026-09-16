@@ -457,6 +457,20 @@ def _count_feature(
 # --------------------------------------------------------------------------
 
 
+def candidate_strategy(recipe: Mapping[str, Any]) -> str:
+    return str((recipe.get("candidate_generation") or {}).get("strategy") or "popularity_topn")
+
+
+def uses_logged_candidates(recipe: Mapping[str, Any]) -> bool:
+    """Whether the candidate set is the one the container actually showed.
+
+    There is nothing to generate then, and no ``n``: the set is closed at three
+    to five items per render, which is what retires the
+    ``n x validation_rows`` feature frame for this mode.
+    """
+    return candidate_strategy(recipe) == "logged_impressions"
+
+
 def _candidates_for(
     recipe: Mapping[str, Any], state: _State, history: Sequence[Any]
 ) -> list[Any]:
@@ -465,6 +479,14 @@ def _candidates_for(
     n = int(block.get("n") or 200)
     exclude_seen = bool(block.get("exclude_seen", True))
     seen = set(map(str, history or ()))
+
+    if strategy == "logged_impressions":
+        # The candidates arrive on the group row; a generator asked for them
+        # here has lost them, which is a bug rather than a fallback.
+        raise UnsupportedRecipe(
+            "candidate strategy 'logged_impressions' takes the candidates from the "
+            "group row; nothing should be generating them"
+        )
 
     picks: list[Any] = []
     if strategy == "history_attribute_expansion":
@@ -677,14 +699,27 @@ class TabularModel:
         return self.backend.predict(self.booster, frame), groups, items
 
     def recommend(
-        self, histories: Sequence[Sequence[Any]], k: int = 10
+        self,
+        histories: Sequence[Sequence[Any]],
+        k: int = 10,
+        candidates: Sequence[Sequence[Any]] | None = None,
+        positions: Sequence[Sequence[float]] | None = None,
     ) -> list[list[Any]]:
-        """Top-``k`` items per history: generate candidates, score, rank."""
+        """Top-``k`` items per unit: take or generate candidates, score, rank.
+
+        ``candidates`` is supplied in ``grouped_rerank`` mode, where the set is
+        closed at what the container showed; ``positions`` is accepted for
+        interface symmetry with the incumbent and deliberately ignored, because
+        a model that scored on the slot it was given could not be served.
+        """
         k = int(k)
         histories = [list(h or ()) for h in histories]
-        candidates = [
-            _candidates_for(self.recipe, self.state, history) for history in histories
-        ]
+        if candidates is None:
+            candidates = [
+                _candidates_for(self.recipe, self.state, history) for history in histories
+            ]
+        else:
+            candidates = [list(row or ()) for row in candidates]
         scores, groups, items = self.score(histories, candidates)
 
         out: list[list[Any]] = [[] for _ in histories]
@@ -826,6 +861,36 @@ def _sequences(train_df, user_col: str, item_col: str, ts_col: str) -> dict[Any,
     return build_sequences(train_df, user_col=user_col, item_col=item_col, ts_col=ts_col)
 
 
+def grouped_examples(
+    frame, max_rows: int
+) -> tuple[list[list[Any]], list[list[Any]], list[list[float]]]:
+    """``(candidates, positives, labels)`` read off a render-grain split.
+
+    One row per render, carrying the closed candidate set, the incumbent's
+    slots and the conversion labels. Nothing is generated and nothing is
+    sampled: the candidates are what the container showed.
+    """
+    candidates: list[list[Any]] = []
+    positives: list[list[Any]] = []
+    labels: list[list[float]] = []
+    for row in frame.itertuples(index=False):
+        items = list(getattr(row, "candidates", ()) or ())
+        flags = [float(x) for x in (getattr(row, "labels", ()) or ())]
+        if len(items) < 2 or len(flags) != len(items):
+            continue
+        converted = [item for item, flag in zip(items, flags, strict=True) if flag > 0]
+        if not converted:
+            # A render nobody converted in carries no signal for a ranker and
+            # no label for a classifier; the harness excludes it too.
+            continue
+        candidates.append(items)
+        positives.append(converted)
+        labels.append(flags)
+        if len(candidates) >= int(max_rows):
+            break
+    return candidates, positives, labels
+
+
 def _labelled_examples(
     recipe: Mapping[str, Any],
     train_df,
@@ -914,6 +979,29 @@ def _sample_negatives(
     size = min(int(n), len(pool))
     idx = rng.choice(len(pool), size=size, replace=False, p=weights)
     return [pool[int(i)] for i in np.atleast_1d(idx)]
+
+
+def _grouped_dataset(
+    recipe: Mapping[str, Any],
+    state: _State,
+    candidates: Sequence[Sequence[Any]],
+    labels: Sequence[Sequence[float]],
+) -> dict[str, Any] | None:
+    """One labelled group per render, over the candidates the container showed.
+
+    No negative sampling: every candidate is a real impression, and the rows
+    that did not convert are the negatives. Sampling them would throw away the
+    only thing that makes this a re-ranking problem.
+    """
+    if not candidates:
+        return None
+    frame, groups, _items = build_rows(recipe, state, candidates, candidates)
+    y = np.asarray([label for row in labels for label in row], dtype=np.float64)
+    frame, y, groups = _apply_filters(recipe, frame, y, groups)
+    if len(frame) == 0:
+        return None
+    _, sizes = np.unique(groups, return_counts=True)
+    return {"X": frame, "y": y, "group_sizes": sizes.tolist()}
 
 
 def _dataset(
@@ -1059,19 +1147,44 @@ def fit_family(
     ts_col = str(flat["ts_col"])
     rng = np.random.default_rng(int(flat["seed"]))
 
+    grouped = uses_logged_candidates(recipe)
     state = build_state(recipe, train_df, item_col, extra_frames)
-    sequences = _sequences(train_df, user_col, item_col, ts_col)
-    histories, positives = _labelled_examples(
-        recipe,
-        train_df,
-        sequences,
-        user_col,
-        item_col,
-        ts_col,
-        int(flat["max_train_rows"]),
-    )
     negatives = int(flat["negative_samples_per_positive"])
-    train_set = _dataset(recipe, state, histories, positives, negatives, rng)
+
+    if grouped:
+        # Render grain: the candidates, their order and their labels are all on
+        # the row, so there is nothing to generate or sample.
+        candidates, _positives, labels = grouped_examples(
+            train_df, int(flat["max_train_rows"])
+        )
+        train_set = _grouped_dataset(recipe, state, candidates, labels)
+        val_set = None
+        if val_df is not None and len(val_df):
+            val_candidates, _vp, val_labels = grouped_examples(
+                val_df, int(flat["max_validation_users"])
+            )
+            val_set = _grouped_dataset(recipe, state, val_candidates, val_labels)
+    else:
+        sequences = _sequences(train_df, user_col, item_col, ts_col)
+        histories, positives = _labelled_examples(
+            recipe,
+            train_df,
+            sequences,
+            user_col,
+            item_col,
+            ts_col,
+            int(flat["max_train_rows"]),
+        )
+        train_set = _dataset(recipe, state, histories, positives, negatives, rng)
+        val_histories, val_targets = _validation_examples(
+            val_df, int(flat["max_validation_users"])
+        )
+        val_set = (
+            _dataset(recipe, state, val_histories, val_targets, negatives, rng)
+            if val_histories
+            else None
+        )
+
     if train_set is None:
         raise ValueError(
             "the recipe produced no labelled training rows: every group ended up with "
@@ -1079,15 +1192,6 @@ def fit_family(
             "candidate_generation.exclude_seen leaves any negatives for this catalog "
             f"({len(state.catalog)} items)."
         )
-
-    val_histories, val_targets = _validation_examples(
-        val_df, int(flat["max_validation_users"])
-    )
-    val_set = (
-        _dataset(recipe, state, val_histories, val_targets, negatives, rng)
-        if val_histories
-        else None
-    )
 
     params = {
         "objective": str(flat.get("objective") or objective_default),

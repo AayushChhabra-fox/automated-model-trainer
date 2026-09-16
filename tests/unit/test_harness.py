@@ -27,7 +27,7 @@ from amt.jobs.eval.harness import (
 
 def test_harness_version_is_pinned():
     # The contract records this string; bumping it must be deliberate.
-    assert HARNESS_VERSION == "1.0.0"
+    assert HARNESS_VERSION == "1.1.0"
 
 
 def test_the_contract_metric_vocabulary_matches_this_module():

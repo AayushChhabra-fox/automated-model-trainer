@@ -37,6 +37,10 @@ __all__ = [
 
 FAMILIES: dict[str, str] = {
     "popularity": "amt.jobs.models.popularity",
+    # The incumbent ranking, for `grouped_rerank`. A family rather than a
+    # special case in `run_baseline`, so it goes through the same fit, save,
+    # pyfunc and evaluation path as anything it is compared against.
+    "logged_order": "amt.jobs.models.logged_order",
     "sasrec": "amt.jobs.models.sasrec",
     "xgboost_classifier": "amt.jobs.models.xgboost_classifier",
     "xgboost_reranker": "amt.jobs.models.xgboost_reranker",

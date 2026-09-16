@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import numpy as np
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -23,6 +25,58 @@ from amt.testing import (
 )
 
 __all__ = ["FakeLLM"]
+
+
+class _StubBackend:
+    """Stands in for xgboost/lightgbm so the recipe path is tested without them."""
+
+    name = "stub"
+    artifact = "booster.json"
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def fit(self, train, validation, params, rounds, early_stopping_rounds, ranker):
+        self.calls.append(
+            {
+                "params": dict(params),
+                "ranker": ranker,
+                "rounds": rounds,
+                "early_stopping_rounds": early_stopping_rounds,
+                "n_rows": len(train["X"]),
+                "positives": float(np.sum(train["y"])),
+                "group_sizes": list(train["group_sizes"]),
+                "n_val_rows": None if validation is None else len(validation["X"]),
+            }
+        )
+        metric = params.get("eval_metric") or params.get("metric")
+        curve = {"train": {metric: [0.5, 0.4]}, "validation": {metric: [0.6, 0.55]}}
+        return {"weights": [1.0] * train["X"].shape[1]}, curve, 2
+
+    def predict(self, booster, frame):
+        return frame.to_numpy(dtype=float) @ np.asarray(booster["weights"])
+
+    def save(self, booster, path):
+        import os
+
+        with open(os.path.join(path, self.artifact), "w", encoding="utf-8") as fh:
+            json.dump(booster, fh)
+
+    def load(self, path):
+        import os
+
+        with open(os.path.join(path, self.artifact), encoding="utf-8") as fh:
+            return json.load(fh)
+
+
+@pytest.fixture
+def stub_backend(monkeypatch):
+    from amt.jobs.models import tabular_common
+
+    stub = _StubBackend()
+    monkeypatch.setitem(tabular_common.BACKENDS, "xgboost", stub)
+    monkeypatch.setitem(tabular_common.BACKENDS, "lightgbm", stub)
+    return stub
 
 
 @pytest.fixture
@@ -106,6 +160,8 @@ def campaign(settings: Settings):
         executor: Any | None = None,
         family: str = "sasrec",
         structural_drift_on_iteration: int = 0,
+        evaluation_mode: str = "next_item",
+        gate_champions: bool = True,
     ):
         mock_executor, llm_factory, canned = mock_stack(
             qa_outcome=qa_outcome,  # type: ignore[arg-type]
@@ -114,6 +170,7 @@ def campaign(settings: Settings):
             n_hypotheses=n_hypotheses,
             family=family,
             structural_drift_on_iteration=structural_drift_on_iteration,
+            evaluation_mode=evaluation_mode,
         )
         executor = executor or mock_executor
         graph = build_graph(
@@ -122,6 +179,7 @@ def campaign(settings: Settings):
             settings=settings,
             checkpointer=MemorySaver(),
             use_mlflow=False,
+            gate_champions=gate_champions,
         )
         config = {"configurable": {"thread_id": campaign_id}, "recursion_limit": 150}
         return graph, config, executor, canned

@@ -86,6 +86,7 @@ def test_build_eval_frame_keeps_raw_ids_and_sorts_users():
 def test_registry_exposes_every_family():
     assert set(registry.FAMILIES) == {
         "popularity",
+        "logged_order",
         "sasrec",
         "xgboost_classifier",
         "xgboost_reranker",
@@ -589,58 +590,6 @@ def test_tabular_rankers_group_candidates_by_request():
     model = _fit_tabular("xgboost_reranker")
     assert model.recipe["group_key"] == "user_id"
     assert model.cfg["n_train_rows"] > 0
-
-
-class _StubBackend:
-    """Stands in for xgboost/lightgbm so the recipe path is tested without them."""
-
-    name = "stub"
-    artifact = "booster.json"
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def fit(self, train, validation, params, rounds, early_stopping_rounds, ranker):
-        self.calls.append(
-            {
-                "params": dict(params),
-                "ranker": ranker,
-                "rounds": rounds,
-                "early_stopping_rounds": early_stopping_rounds,
-                "n_rows": len(train["X"]),
-                "positives": float(np.sum(train["y"])),
-                "group_sizes": list(train["group_sizes"]),
-                "n_val_rows": None if validation is None else len(validation["X"]),
-            }
-        )
-        metric = params.get("eval_metric") or params.get("metric")
-        curve = {"train": {metric: [0.5, 0.4]}, "validation": {metric: [0.6, 0.55]}}
-        return {"weights": [1.0] * train["X"].shape[1]}, curve, 2
-
-    def predict(self, booster, frame):
-        return frame.to_numpy(dtype=float) @ np.asarray(booster["weights"])
-
-    def save(self, booster, path):
-        import os
-
-        with open(os.path.join(path, self.artifact), "w", encoding="utf-8") as fh:
-            json.dump(booster, fh)
-
-    def load(self, path):
-        import os
-
-        with open(os.path.join(path, self.artifact), encoding="utf-8") as fh:
-            return json.load(fh)
-
-
-@pytest.fixture
-def stub_backend(monkeypatch):
-    from amt.jobs.models import tabular_common
-
-    stub = _StubBackend()
-    monkeypatch.setitem(tabular_common.BACKENDS, "xgboost", stub)
-    monkeypatch.setitem(tabular_common.BACKENDS, "lightgbm", stub)
-    return stub
 
 
 @pytest.mark.parametrize("family", BOOSTER_FAMILIES)

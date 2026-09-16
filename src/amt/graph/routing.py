@@ -198,6 +198,19 @@ def route_after_trainer_interpret(state: CampaignState) -> str:
     return "trainer_propose" if should_continue else "select_hypothesis_champion"
 
 
+def route_after_hc_champion(state: CampaignState) -> str:
+    """HC_CHAMPION: ``freeze`` stops exploring; anything else plans the next hypothesis.
+
+    ``freeze`` is a shortcut through selection, not around it: the node has
+    already abandoned every pending hypothesis, so routing to
+    `planner_select_hypothesis` would reach the final champion anyway. Going
+    straight there makes the operator's intent legible in the graph.
+    """
+    if state.get("freeze_requested"):
+        return "planner_final_champion"
+    return "planner_select_hypothesis"
+
+
 def phase0_max_attempts(state: CampaignState) -> int:
     """The Phase 0 retry cap, as ``qa_phase0_node`` stamped it from settings.
 

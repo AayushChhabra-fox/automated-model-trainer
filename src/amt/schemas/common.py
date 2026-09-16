@@ -14,23 +14,41 @@ from pydantic import BaseModel, ConfigDict, Field
 SplitName = Literal["train", "validation", "qa"]
 MetricDirection = Literal["maximize", "minimize"]
 
-# The metrics the evaluation harness can actually compute, as ``family@k``.
+# The ranking metrics the evaluation harness computes, as ``family@k``.
 # Duplicated here rather than imported from ``amt.jobs.eval.harness`` so the
 # contracts stay free of the job runtime; ``tests/unit/test_harness.py``
 # asserts the two lists agree.
 HARNESS_METRIC_FAMILIES = ("recall", "ndcg", "hitrate", "mrr", "coverage")
 
+# Pointwise classification metrics, computed only in ``grouped_rerank`` mode
+# where every candidate carries a label. They are admissible as *secondaries*
+# and never as the primary: a better AUC over impressions does not move a
+# container, and pre-registering one as the thing to beat is how the previous
+# campaign ended up optimising a number nobody asked for.
+SECONDARY_METRIC_FAMILIES = ("auc", "pr_auc", "logloss", "ece")
+
 _HARNESS_METRIC = re.compile(rf"^({'|'.join(HARNESS_METRIC_FAMILIES)})@([1-9][0-9]*)$")
+_SECONDARY_METRIC = re.compile(rf"^({'|'.join(SECONDARY_METRIC_FAMILIES)})$")
 
 
-def is_harness_metric(name: str) -> bool:
+def is_harness_metric(name: str, *, primary: bool = False) -> bool:
     """Whether the harness computes ``name`` (``ndcg@10`` yes, ``PR-AUC`` no).
 
     A contract may only pre-register metrics the harness produces: a primary
     metric nothing computes cannot select a champion, and QA would compare
-    candidates on a number that never exists.
+    candidates on a number that never exists. With ``primary=True`` the
+    pointwise families are rejected too, because the primary metric has to be
+    the one that moves the product.
     """
-    return bool(_HARNESS_METRIC.match(str(name).strip()))
+    text = str(name).strip()
+    if _HARNESS_METRIC.match(text):
+        return True
+    return not primary and bool(_SECONDARY_METRIC.match(text.lower()))
+
+
+def is_secondary_only_metric(name: str) -> bool:
+    """True for a metric the harness computes but refuses as the primary."""
+    return bool(_SECONDARY_METRIC.match(str(name).strip().lower()))
 
 
 def utcnow() -> datetime:

@@ -92,6 +92,25 @@ class SplitPlan:
     n_val: int = 1
     n_qa: int = 1
     table_prefix: str = ""
+    # `grouped_rerank` only.
+    evaluation_mode: str = "next_item"
+    group_key: list[str] = field(default_factory=list)
+    position_column: str = ""
+    label_column: str = ""
+    positive_values: list[Any] = field(default_factory=list)
+    relevance_weighting: str = "none"
+    propensity_floor: float = 0.02
+    #: Column the propensities are estimated per, when it exists in the source.
+    #: Position mechanics differ by device -- a D-pad and a swipe carousel are
+    #: not the same rail -- so one propensity table across clients would be an
+    #: average of two different behaviours.
+    propensity_by: str = "client_name"
+    cohort_columns: list[str] = field(default_factory=list)
+    min_candidates_per_group: int = 2
+
+    @property
+    def grouped(self) -> bool:
+        return self.evaluation_mode == "grouped_rerank"
 
     def table(self, split: str) -> str:
         leaf = SPLIT_TABLE_NAMES[split]
@@ -139,12 +158,35 @@ def plan_from_contract(contract: Mapping[str, Any]) -> SplitPlan:
             if v
         }
     )
+    # `grouped_rerank`: the render key, the incumbent's slot and the label.
+    label = dict(contract.get("label_spec") or {})
+    kwargs.update(
+        {
+            k: v
+            for k, v in (
+                ("evaluation_mode", contract.get("evaluation_mode")),
+                ("relevance_weighting", contract.get("relevance_weighting")),
+                ("propensity_floor", contract.get("propensity_floor")),
+                ("group_key", dataset.get("group_key")),
+                ("position_column", dataset.get("position_column")),
+                ("label_column", label.get("source_column")),
+                ("positive_values", label.get("positive_values")),
+                ("cohort_columns", contract.get("cohort_columns")),
+            )
+            if v
+        }
+    )
     kwargs.update({k: v for k, v in override.items() if k in known})
 
     plan = SplitPlan(**kwargs)
     plan.filters = list(plan.filters or [])
     if not plan.source_table and not plan.source_path:
         raise ValueError("the contract names no dataset.source_table, so there is nothing to split")
+    if plan.grouped and not (plan.group_key and plan.position_column):
+        raise ValueError(
+            "evaluation_mode 'grouped_rerank' needs dataset.group_key and "
+            "dataset.position_column: one render is one evaluation unit"
+        )
     return plan
 
 
@@ -303,6 +345,208 @@ def _leave_last_n_local(df, plan: SplitPlan):
     )
 
 
+# --------------------------------------------------------------------------
+# grouped re-ranking: one render is one row
+# --------------------------------------------------------------------------
+
+
+def parse_position(value: Any) -> float:
+    """The tile's column out of a logged ``item_index``.
+
+    The source records ``"rail_rank,column"`` (and sometimes just the column),
+    so the slot is the last element. A value that parses to nothing is
+    ``inf``, which sorts it last rather than pretending it was first.
+    """
+    if value is None:
+        return float("inf")
+    text = str(value).strip()
+    if not text:
+        return float("inf")
+    try:
+        return float(text.split(",")[-1])
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def estimate_propensities(
+    rows: Sequence[Mapping[str, Any]],
+    floor: float = 0.02,
+    by: str = "",
+) -> dict[str, float]:
+    """Examination propensity of each slot, relative to slot 0.
+
+    A position-based model: ``theta_slot = rate_slot / rate_0``, where a rate
+    is the share of impressions at that slot that converted. Estimated from
+    **train only**, so the weights are frozen ground truth rather than
+    something derived from the split being judged.
+
+    This corrects for *where* an item was shown. It does not correct for
+    *which* items the incumbent chose to show -- there is no logged
+    randomisation to support that, and the report says so.
+    """
+    totals: dict[tuple[str, float], list[float]] = {}
+    for row in rows:
+        segment = str(row.get(by) or "") if by else ""
+        slot = float(row["slot"])
+        bucket = totals.setdefault((segment, slot), [0.0, 0.0])
+        bucket[0] += 1.0
+        bucket[1] += 1.0 if row["label"] else 0.0
+
+    rates = {
+        key: (converted / impressions)
+        for key, (impressions, converted) in totals.items()
+        if impressions > 0
+    }
+    reference = {
+        segment: rate for (segment, slot), rate in rates.items() if slot == 0.0
+    }
+
+    out: dict[str, float] = {}
+    for (segment, slot), rate in sorted(rates.items()):
+        base = reference.get(segment, 0.0)
+        # Without a slot-0 rate to divide by there is no reference examination
+        # probability, so the honest answer is "no correction" rather than a
+        # ratio against an arbitrary denominator.
+        theta = 1.0 if base <= 0 else rate / base
+        out[f"{segment}|{slot:g}"] = float(max(min(theta, 1.0), float(floor)))
+    return out
+
+
+def relevance_weight(
+    propensities: Mapping[str, float], segment: str, slot: float, floor: float
+) -> float:
+    """``1 / theta`` for a conversion at ``slot``, capped by the floor."""
+    theta = propensities.get(f"{segment}|{slot:g}")
+    if theta is None:
+        theta = propensities.get(f"|{slot:g}", 1.0)
+    return 1.0 / max(float(theta), float(floor))
+
+
+def _grouped_rows(df, plan: SplitPlan, propensities: Mapping[str, float] | None):
+    """Collapse impression rows into one row per render.
+
+    Renders with fewer than ``min_candidates_per_group`` distinct candidates
+    are dropped: there is nothing to re-rank, so they can only add noise and
+    flatter whichever ranker is being scored.
+    """
+    import pandas as pd
+
+    keys = list(plan.group_key)
+    positive = {str(v) for v in (plan.positive_values or [])}
+    rows: list[dict[str, Any]] = []
+
+    for key, group in df.groupby(keys, sort=True, dropna=False):
+        key_values = key if isinstance(key, tuple) else (key,)
+        ordered = group.assign(
+            _slot=[parse_position(v) for v in group[plan.position_column]]
+        ).sort_values("_slot", kind="mergesort")
+        # One impression per item: a render that showed a title twice is one
+        # candidate, and it keeps the better (earlier) slot.
+        ordered = ordered.drop_duplicates(subset=[plan.item_col], keep="first")
+        if len(ordered) < int(plan.min_candidates_per_group):
+            continue
+
+        labels = [
+            1.0 if (str(v) in positive if positive else bool(v)) else 0.0
+            for v in (
+                ordered[plan.label_column]
+                if plan.label_column in ordered.columns
+                else [False] * len(ordered)
+            )
+        ]
+        slots = [float(s) for s in ordered["_slot"]]
+        segment = (
+            str(ordered[plan.propensity_by].iloc[0])
+            if plan.propensity_by in ordered.columns
+            else ""
+        )
+        row: dict[str, Any] = {
+            "group_id": "|".join(str(v) for v in key_values),
+            "candidates": ordered[plan.item_col].tolist(),
+            "positions": slots,
+            "labels": labels,
+            "user_id": str(ordered[plan.user_col].iloc[0])
+            if plan.user_col in ordered.columns
+            else "",
+            "ts": ordered[plan.ts_col].iloc[0] if plan.ts_col in ordered.columns else None,
+        }
+        if propensities is not None:
+            row["weights"] = [
+                relevance_weight(propensities, segment, slot, plan.propensity_floor)
+                if label > 0
+                else 0.0
+                for slot, label in zip(slots, labels, strict=True)
+            ]
+        for column in plan.cohort_columns:
+            if column in ordered.columns:
+                row[column] = ordered[column].iloc[0]
+        if plan.propensity_by in ordered.columns:
+            row[plan.propensity_by] = segment
+        rows.append(row)
+
+    columns = ["group_id", "candidates", "positions", "labels", "user_id", "ts"]
+    if propensities is not None:
+        columns.append("weights")
+    extra = [c for c in (*plan.cohort_columns, plan.propensity_by) if c]
+    columns += [c for c in dict.fromkeys(extra) if any(c in r for r in rows)]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _grouped_local(df, plan: SplitPlan):
+    """``(train, validation, qa, propensities)`` at render grain."""
+    import pandas as pd
+
+    df, ts = _align_timestamps(df, plan, (plan.train_end, plan.val_end, plan.qa_end))
+    train_end, val_end = plan.train_end, plan.val_end
+    qa_end = plan.qa_end if plan.qa_end is not None else ts.max()
+    if train_end is None or val_end is None:
+        raise ValueError("a grouped_rerank split requires train_end and validation_end")
+
+    def _cast(bound):
+        if bound is None:
+            return None
+        return pd.to_datetime(bound) if pd.api.types.is_datetime64_any_dtype(ts) else bound
+
+    train_end, val_end, qa_end = _cast(train_end), _cast(val_end), _cast(qa_end)
+    windows = {
+        "train": df[ts <= train_end],
+        "validation": df[(ts > train_end) & (ts <= val_end)],
+        "qa": df[(ts > val_end) & (ts <= qa_end)],
+    }
+
+    propensities: dict[str, float] | None = None
+    if plan.relevance_weighting == "pbm":
+        positive = {str(v) for v in (plan.positive_values or [])}
+        train = windows["train"]
+        propensities = estimate_propensities(
+            [
+                {
+                    "slot": parse_position(slot),
+                    "label": (str(label) in positive if positive else bool(label)),
+                    plan.propensity_by: segment,
+                }
+                for slot, label, segment in zip(
+                    train[plan.position_column],
+                    train[plan.label_column]
+                    if plan.label_column in train.columns
+                    else [False] * len(train),
+                    train[plan.propensity_by]
+                    if plan.propensity_by in train.columns
+                    else [""] * len(train),
+                    strict=True,
+                )
+            ],
+            floor=plan.propensity_floor,
+            by=plan.propensity_by,
+        )
+
+    frames = {
+        name: _grouped_rows(window, plan, propensities)
+        for name, window in windows.items()
+    }
+    return frames["train"], frames["validation"], frames["qa"], (propensities or {})
+
+
 def _pandas_predicate(predicate: str) -> str:
     """A contract filter in ``DataFrame.query`` syntax.
 
@@ -336,12 +580,20 @@ def _materialize_local(
     df = read_local_table(path)
     for predicate in plan.filters:
         df = df.query(_pandas_predicate(predicate))
-    df = _eligible(df, plan)
 
-    if plan.strategy == "leave_last_n":
-        train, validation, qa = _leave_last_n_local(df, plan)
+    propensities: dict[str, float] = {}
+    if plan.grouped:
+        # No per-user eligibility: the unit is a render, and a render is
+        # eligible when it showed something worth re-ordering.
+        train, validation, qa, propensities = _grouped_local(df, plan)
+        identity = "group_id"
     else:
-        train, validation, qa = _temporal_local(df, plan)
+        df = _eligible(df, plan)
+        if plan.strategy == "leave_last_n":
+            train, validation, qa = _leave_last_n_local(df, plan)
+        else:
+            train, validation, qa = _temporal_local(df, plan)
+        identity = plan.user_col
 
     ext = ".parquet" if _parquet_available() else ".jsonl"
     refs: dict[str, Any] = {}
@@ -354,9 +606,11 @@ def _materialize_local(
             "path": out_path,
             "delta_version": 0,
             "row_count": len(frame),
-            "membership_hash": membership_hash(frame[plan.user_col].tolist()),
+            "membership_hash": membership_hash(
+                frame[identity].tolist() if identity in frame.columns else []
+            ),
         }
-    return _result(contract, plan, refs, backend="local")
+    return _result(contract, plan, refs, backend="local", propensities=propensities)
 
 
 def _parquet_available() -> bool:
@@ -427,11 +681,164 @@ def _ensure_schema(spark: Any, plan: SplitPlan) -> None:
         spark.sql(f"CREATE SCHEMA IF NOT EXISTS {plan.catalog}.{plan.schema}")
 
 
+def _slot_expr(plan: SplitPlan) -> str:
+    """The tile's column out of ``item_index``; mirrors :func:`parse_position`."""
+    column = plan.position_column
+    return (
+        f"try_cast(element_at(split(cast({column} AS string), ','), -1) AS DOUBLE)"
+    )
+
+
+def _label_expr(plan: SplitPlan) -> str:
+    column = plan.label_column
+    if not column:
+        return "FALSE"
+    if not plan.positive_values:
+        return f"coalesce(cast({column} AS BOOLEAN), FALSE)"
+    values = ", ".join(_lit(str(v)) for v in plan.positive_values)
+    return f"(cast({column} AS string) IN ({values}))"
+
+
+def _grouped_base_cte(plan: SplitPlan) -> str:
+    """Impression rows, one per (render, item), with the slot and label resolved."""
+    extra = [c for c in dict.fromkeys([*plan.cohort_columns, plan.propensity_by]) if c]
+    carried = "".join(f", {c}" for c in extra)
+    return (
+        "base AS (SELECT concat_ws('|', "
+        + ", ".join(f"cast({k} AS string)" for k in plan.group_key)
+        + ") AS group_id, "
+        f"{plan.item_col} AS item_id, {plan.ts_col} AS ts, "
+        f"{plan.user_col} AS user_id, "
+        f"{_slot_expr(plan)} AS slot, "
+        f"cast({_label_expr(plan)} AS DOUBLE) AS label{carried} "
+        f"FROM {plan.source_table} WHERE {_where(plan)} "
+        f"AND {plan.item_col} IS NOT NULL AND {plan.ts_col} IS NOT NULL "
+        f"AND {plan.position_column} IS NOT NULL), "
+        # One impression per item per render, keeping the better slot: a rail
+        # that showed a title twice offers one candidate, not two.
+        "dedup AS (SELECT * FROM (SELECT *, row_number() OVER ("
+        "PARTITION BY group_id, item_id ORDER BY slot) AS rn FROM base) WHERE rn = 1), "
+        f"grp AS (SELECT group_id, min(ts) AS ts, min(user_id) AS user_id{carried}, "
+        "transform(array_sort(collect_list(struct(slot, item_id, label)), "
+        "(l, r) -> CASE WHEN l.slot < r.slot THEN -1 WHEN l.slot > r.slot THEN 1 "
+        "ELSE 0 END), x -> x.item_id) AS candidates, "
+        "transform(array_sort(collect_list(struct(slot, item_id, label)), "
+        "(l, r) -> CASE WHEN l.slot < r.slot THEN -1 WHEN l.slot > r.slot THEN 1 "
+        "ELSE 0 END), x -> x.slot) AS positions, "
+        "transform(array_sort(collect_list(struct(slot, item_id, label)), "
+        "(l, r) -> CASE WHEN l.slot < r.slot THEN -1 WHEN l.slot > r.slot THEN 1 "
+        "ELSE 0 END), x -> x.label) AS labels "
+        f"FROM dedup GROUP BY group_id{carried} "
+        f"HAVING size(candidates) >= {int(plan.min_candidates_per_group)})"
+    )
+
+
+def _weights_expr(plan: SplitPlan, propensities: Mapping[str, float]) -> str:
+    """``labels`` turned into gains by the frozen per-slot propensities.
+
+    Built as a literal CASE over the estimates rather than recomputed per
+    split, because the weighting has to be identical for train, validation and
+    QA -- it is part of the contract, not of the split.
+    """
+    if plan.relevance_weighting != "pbm" or not propensities:
+        return ""
+    segment = (
+        f"cast({plan.propensity_by} AS string)" if plan.propensity_by else "''"
+    )
+    branches = []
+    for key, theta in sorted(propensities.items()):
+        seg, _, slot = key.rpartition("|")
+        weight = 1.0 / max(float(theta), float(plan.propensity_floor))
+        branches.append(
+            f"WHEN {segment} = {_lit(seg)} AND p = {slot} THEN {weight:.6f}"
+        )
+    case = "CASE " + " ".join(branches) + " ELSE 1.0 END"
+    return (
+        ", zip_with(labels, positions, (l, p) -> "
+        f"CASE WHEN l > 0 THEN {case} ELSE 0.0 END) AS weights"
+    )
+
+
+def _estimate_propensities_spark(plan: SplitPlan, spark: Any) -> dict[str, float]:
+    """Per-slot conversion rates on the *train* window, as ratios to slot 0."""
+    segment = plan.propensity_by if plan.propensity_by else "''"
+    rows = spark.sql(
+        f"WITH {_grouped_base_cte(plan)} "
+        f"SELECT cast({segment} AS string) AS segment, slot, "
+        "count(*) AS impressions, sum(label) AS converted "
+        f"FROM dedup WHERE ts <= {_lit(plan.train_end)} "
+        "GROUP BY 1, 2"
+    ).collect()
+    return estimate_propensities(
+        _expand_rates(rows, plan.propensity_by),
+        floor=plan.propensity_floor,
+        by=plan.propensity_by,
+    )
+
+
+def _expand_rates(rows: Sequence[Any], by: str) -> list[dict[str, Any]]:
+    """Aggregate ``(segment, slot, impressions, converted)`` rows as pseudo-rows.
+
+    Keeps one estimator: the aggregation happens in Spark for scale, and the
+    arithmetic that turns rates into propensities stays the pure function the
+    pandas path and the unit tests use.
+    """
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        slot = row["slot"]
+        if slot is None:
+            continue
+        converted = int(row["converted"] or 0)
+        impressions = int(row["impressions"] or 0)
+        out.extend(
+            {"slot": float(slot), "label": True, by: row["segment"]}
+            for _ in range(converted)
+        )
+        out.extend(
+            {"slot": float(slot), "label": False, by: row["segment"]}
+            for _ in range(max(0, impressions - converted))
+        )
+    return out
+
+
+def _grouped_sql(plan: SplitPlan, propensities: Mapping[str, float]) -> dict[str, str]:
+    """One query per split; rows are renders, ordered by the incumbent's slots."""
+    train_end = _lit(plan.train_end)
+    val_end = _lit(plan.val_end)
+    qa_end = _lit(plan.qa_end) if plan.qa_end is not None else "(SELECT max(ts) FROM dedup)"
+    weights = _weights_expr(plan, propensities)
+    carried = "".join(
+        f", {c}" for c in dict.fromkeys([*plan.cohort_columns, plan.propensity_by]) if c
+    )
+    select = (
+        "SELECT group_id, candidates, positions, labels, user_id, ts"
+        f"{carried}{weights} FROM grp"
+    )
+    return {
+        "train": f"WITH {_grouped_base_cte(plan)} {select} WHERE ts <= {train_end}",
+        "validation": (
+            f"WITH {_grouped_base_cte(plan)} {select} "
+            f"WHERE ts > {train_end} AND ts <= {val_end}"
+        ),
+        "qa": (
+            f"WITH {_grouped_base_cte(plan)} {select} "
+            f"WHERE ts > {val_end} AND ts <= {qa_end}"
+        ),
+    }
+
+
 def _materialize_spark(
     contract: Mapping[str, Any], plan: SplitPlan, spark: Any
 ) -> dict[str, Any]:
-    if plan.strategy == "leave_last_n":
+    propensities: dict[str, float] = {}
+    if plan.grouped:
+        if plan.relevance_weighting == "pbm":
+            propensities = _estimate_propensities_spark(plan, spark)
+        queries = _grouped_sql(plan, propensities)
+        identity = "group_id"
+    elif plan.strategy == "leave_last_n":
         queries = _leave_last_n_sql(plan)
+        identity = "user_id"
     else:
         train_end = _lit(plan.train_end)
         val_end = _lit(plan.val_end)
@@ -446,6 +853,7 @@ def _materialize_spark(
                 plan, val_end, val_end, qa_end or "(SELECT max(ts) FROM f)"
             ),
         }
+        identity = "user_id"
 
     _ensure_schema(spark, plan)
     refs: dict[str, Any] = {}
@@ -458,7 +866,7 @@ def _materialize_spark(
             spark.sql(f"DESCRIBE HISTORY {table} LIMIT 1").collect()[0]["version"]
         )
         digest = spark.sql(
-            "SELECT sha2(concat_ws(',', array_sort(collect_list(cast(user_id AS "
+            f"SELECT sha2(concat_ws(',', array_sort(collect_list(cast({identity} AS "
             f"string)))), 256) AS h FROM {table}"
         ).collect()[0][0]
         refs[name] = {
@@ -468,7 +876,7 @@ def _materialize_spark(
             "row_count": row_count,
             "membership_hash": digest,
         }
-    return _result(contract, plan, refs, backend="spark")
+    return _result(contract, plan, refs, backend="spark", propensities=propensities)
 
 
 def _leave_last_n_sql(plan: SplitPlan) -> dict[str, str]:
@@ -528,6 +936,7 @@ def _result(
     plan: SplitPlan,
     refs: Mapping[str, Any],
     backend: str,
+    propensities: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     from amt.jobs.eval.harness import HARNESS_VERSION
 
@@ -537,6 +946,9 @@ def _result(
         "schema": plan.schema,
         "source_table": plan.source_table,
         "strategy": plan.strategy,
+        "evaluation_mode": plan.evaluation_mode,
+        "relevance_weighting": plan.relevance_weighting,
+        "propensities": dict(propensities or {}),
         "backend": backend,
         "contract_hash": contract.get("contract_hash"),
         "harness_version": HARNESS_VERSION,

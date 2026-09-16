@@ -56,7 +56,12 @@ console = Console()
 
 
 # --- wiring -----------------------------------------------------------------------
-def _build(mock: bool, campaign_id: str, max_iterations: int | None = None) -> Any:
+def _build(
+    mock: bool,
+    campaign_id: str,
+    max_iterations: int | None = None,
+    gate_champions: bool = True,
+) -> Any:
     """Compile a graph with either the mock stack or the real Databricks stack."""
     settings = get_settings()
     checkpointer = sqlite_checkpointer(settings=settings)
@@ -70,6 +75,7 @@ def _build(mock: bool, campaign_id: str, max_iterations: int | None = None) -> A
             settings=settings,
             checkpointer=checkpointer,
             use_mlflow=False,
+            gate_champions=gate_champions,
         )
 
     from amt.databricks.sql import ReadOnlySQL  # real probe for Stage 1
@@ -81,6 +87,7 @@ def _build(mock: bool, campaign_id: str, max_iterations: int | None = None) -> A
         sql_probe=ReadOnlySQL(settings=settings),
         checkpointer=checkpointer,
         use_mlflow=True,
+        gate_champions=gate_champions,
     )
 
 
@@ -213,9 +220,14 @@ def start(
     max_iterations: int = typer.Option(6, help="Trainer iterations allowed per hypothesis."),
     max_hypotheses: int = typer.Option(2, help="Hypotheses allowed in the campaign."),
     max_compute_minutes: float = typer.Option(240.0, help="Compute budget for the campaign."),
+    gate_champions: bool = typer.Option(
+        True,
+        "--gate-champions/--no-gate-champions",
+        help="Review each hypothesis champion at HC_CHAMPION before the next one runs.",
+    ),
 ) -> None:
     """Begin a campaign and run to HC2, the ProblemSpec approval."""
-    graph = _build(mock, campaign)
+    graph = _build(mock, campaign, gate_champions=gate_champions)
     if _state(graph, campaign):
         console.print(f"[red]Campaign {campaign!r} already exists.[/red] Use `amt status`.")
         raise typer.Exit(code=1)
@@ -239,15 +251,23 @@ def approve(
         "", "--keep", help="Comma-separated ids to keep; anything else under review is dropped."
     ),
     drop: str = typer.Option("", "--drop", help="Comma-separated ids to abandon."),
+    freeze: bool = typer.Option(
+        False, "--freeze", help="At HC_CHAMPION: stop exploring and take this champion to QA."
+    ),
     mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
 ) -> None:
     """Approve the current human checkpoint and continue.
 
-    At HC_BACKLOG and HC_FEATURE this is a checklist: `--keep` also sets the
-    order the kept items run in, and `--drop` abandons an item without paying
-    for the agent to rewrite the whole list.
+    At HC_BACKLOG, HC_FEATURE and HC_CHAMPION this is a checklist: `--keep`
+    also sets the order the kept items run in, and `--drop` abandons an item
+    without paying for the agent to rewrite the whole list. `--freeze` answers
+    HC_CHAMPION with "this is good enough; do not spend the rest of the budget".
     """
-    _resume(campaign, {"approved": True, "keep": keep, "drop": drop}, mock)
+    _resume(
+        campaign,
+        {"approved": True, "keep": keep, "drop": drop, "freeze": freeze},
+        mock,
+    )
 
 
 @app.command()
@@ -323,7 +343,7 @@ def _prompt_decision(graph: Any, campaign: str, pending: dict) -> dict | None:
     while True:
         answer = typer.prompt(
             f"{pending.get('checkpoint')} > approve | reject <why> | keep <ids> | "
-            "drop <ids> | show | status | quit",
+            "drop <ids> | freeze | show | status | quit",
             default="show",
             show_default=False,
         ).strip()
@@ -342,6 +362,8 @@ def _prompt_decision(graph: Any, campaign: str, pending: dict) -> dict | None:
             return {"approved": True, "keep": rest}
         if verb == "drop":
             return {"approved": True, "drop": rest}
+        if verb == "freeze":
+            return {"approved": True, "freeze": True}
         if verb == "show":
             print(json.dumps(checkpoint_document(pending), indent=2, default=str))
             continue

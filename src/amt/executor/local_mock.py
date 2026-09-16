@@ -111,6 +111,13 @@ class LocalMockExecutor:
             train=ref(contract.train_split, 80_000),
             validation=ref(contract.validation_split, 10_000),
             qa=ref(contract.qa_split, 10_000),
+            # Shaped like the real estimator's output: slot 0 is the reference,
+            # and the deeper slots are examined far less often.
+            propensities=(
+                {"ROKU|0": 1.0, "ROKU|1": 0.12, "ROKU|2": 0.05, "ROKU|3": 0.03}
+                if contract.relevance_weighting == "pbm"
+                else {}
+            ),
             job_run_id="mock-materialize-1",
         )
 

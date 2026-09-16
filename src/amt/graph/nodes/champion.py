@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from langgraph.types import interrupt
+
 from amt.graph.deps import NodeDeps
+from amt.graph.human import apply_checklist, gate_update, parse_resume
 from amt.graph.routing import ContractViolation, assert_contract_hash
 from amt.graph.state import CampaignState, Stage, current_hypothesis
 from amt.schemas.champion import FrozenChampion, HypothesisChampion
+from amt.schemas.common import ExperimentBudget
 
 
 def make_select_hypothesis_champion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
@@ -84,6 +88,100 @@ def make_select_hypothesis_champion_node(deps: NodeDeps) -> Callable[[CampaignSt
         }
 
     return select_hypothesis_champion_node
+
+
+def make_hc_champion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
+    """HC_CHAMPION — a human reads each hypothesis's champion before the next one runs.
+
+    Per hypothesis, not per iteration: the Trainer loop inside a hypothesis
+    stays autonomous, which is the point of the band between HC3 and HC4. What
+    a human gets to decide is whether the *next* hypothesis is worth its
+    compute, which is the decision the previous campaign could only make by
+    abandoning the run.
+    """
+
+    def hc_champion_node(state: CampaignState) -> dict:
+        if not deps.gate_champions:
+            return {}
+        champions = list(state.get("hypothesis_champions") or [])
+        if not champions:
+            # The hypothesis produced nothing worth comparing; there is no
+            # decision to put in front of anyone.
+            return {}
+        contract = state.get("evaluation_contract")
+        budget = state.get("budget") or ExperimentBudget()
+        hypotheses = list(state.get("hypotheses") or [])
+        remaining = [h.hypothesis_id for h in hypotheses if h.status == "pending"]
+
+        payload = interrupt(
+            {
+                "checkpoint": "HC_CHAMPION",
+                "title": f"Champion for {champions[-1].hypothesis_id}",
+                "campaign_id": state.get("campaign_id"),
+                "hypothesis_id": champions[-1].hypothesis_id,
+                "primary_metric": contract.primary_metric if contract else "",
+                "comparison": _comparison(state, champions, contract),
+                "cohort_deltas": dict(champions[-1].cohort_metrics or {}),
+                "guardrails_passed": champions[-1].guardrails_passed,
+                "cohort_regressions": list(champions[-1].cohort_regressions or []),
+                "selection_rationale": champions[-1].selection_rationale,
+                "hypotheses_remaining": remaining,
+                "budget": {
+                    "hypotheses_remaining": budget.hypotheses_remaining,
+                    "compute_minutes_used": round(budget.compute_minutes_used, 1),
+                    "max_compute_minutes": budget.max_compute_minutes,
+                },
+                "instructions": (
+                    "amt approve <campaign> [--drop H4,H5] (continue) "
+                    "| amt approve <campaign> --freeze (stop here and go to QA) "
+                    "| amt reject <campaign> -m '<feedback>'"
+                ),
+            }
+        )
+        decision = parse_resume(payload)
+        update: dict = {**gate_update(state, decision), "champion_reviewed": True}
+        if decision.drop or decision.keep:
+            update["hypotheses"] = apply_checklist(hypotheses, decision, scope=remaining)
+        if decision.freeze:
+            # Skip the rest of the backlog: whatever is pending is abandoned so
+            # `planner_select_hypothesis` has nothing left to choose.
+            kept = update.get("hypotheses", hypotheses)
+            update["hypotheses"] = [
+                h.model_copy(update={"status": "abandoned"}) if h.status == "pending" else h
+                for h in kept
+            ]
+            update["freeze_requested"] = True
+        return update
+
+    return hc_champion_node
+
+
+def _comparison(state: CampaignState, champions: list, contract) -> list[dict]:
+    """The baseline, every prior champion, and this one, on the same metrics.
+
+    A champion's number means nothing alone: the question is whether it beats
+    the incumbent and whether it beats the hypothesis before it.
+    """
+    primary = contract.primary_metric if contract else ""
+    rows: list[dict] = []
+    baseline = state.get("baseline_metrics") or {}
+    if baseline:
+        rows.append({"label": "baseline", "metrics": dict(baseline)})
+    for champion in champions:
+        rows.append(
+            {
+                "label": champion.hypothesis_id,
+                "metrics": {
+                    primary: champion.primary_metric_value,
+                    **{
+                        name: value
+                        for name, value in (champion.secondary_metrics or {}).items()
+                        if name != primary
+                    },
+                },
+            }
+        )
+    return rows
 
 
 def make_freeze_champion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:

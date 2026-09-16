@@ -40,7 +40,13 @@ CastTarget = Literal["float", "int", "code"]
 FilterOp = Literal["eq", "ne", "gt", "gte", "lt", "lte", "in", "not_in", "not_null"]
 SourceRole = Literal["interactions", "item_attributes"]
 LabelStrategy = Literal["holdout_next_item", "interaction_positive", "label_column"]
-CandidateStrategy = Literal["popularity_topn", "history_attribute_expansion"]
+# `logged_impressions` is not a generation strategy at all: the candidates are
+# whatever the container actually showed, read off the group row. It is what
+# makes a re-ranking evaluation bounded -- and it retires the
+# `n x validation_rows` blow-up, because there is no `n`.
+CandidateStrategy = Literal[
+    "popularity_topn", "history_attribute_expansion", "logged_impressions"
+]
 
 # Columns the runtime always puts on a candidate row, so a transform may read
 # them without declaring a source.

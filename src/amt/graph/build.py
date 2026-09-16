@@ -13,6 +13,7 @@ from amt.agents.base import LLMFactory
 from amt.graph.deps import NodeDeps
 from amt.graph.nodes.champion import (
     make_freeze_champion_node,
+    make_hc_champion_node,
     make_select_hypothesis_champion_node,
 )
 from amt.graph.nodes.conclusion import (
@@ -42,6 +43,7 @@ from amt.graph.nodes.trainer import (
     make_trainer_propose_node,
 )
 from amt.graph.routing import (
+    route_after_hc_champion,
     route_after_hc_contract,
     route_after_hc_feature_fit,
     route_after_hc_hypotheses,
@@ -114,6 +116,7 @@ def build_graph(
     checkpointer: Any | None = None,
     use_mlflow: bool = False,
     code_version: str = "",
+    gate_champions: bool = True,
 ) -> Any:
     """Compile the campaign StateGraph.
 
@@ -127,6 +130,7 @@ def build_graph(
         sql_probe=sql_probe,
         use_mlflow=use_mlflow,
         code_version=code_version,
+        gate_champions=gate_champions,
     )
 
     graph = StateGraph(CampaignState)
@@ -146,6 +150,7 @@ def build_graph(
     graph.add_node("execute_training", make_execute_training_node(deps))
     graph.add_node("trainer_interpret", make_trainer_interpret_node(deps))
     graph.add_node("select_hypothesis_champion", make_select_hypothesis_champion_node(deps))
+    graph.add_node("hc_champion", make_hc_champion_node(deps))
     graph.add_node("planner_final_champion", make_planner_final_champion_node(deps))
     graph.add_node("freeze_champion", make_freeze_champion_node(deps))
     graph.add_node("qa_phase0", make_qa_phase0_node(deps))
@@ -210,7 +215,15 @@ def build_graph(
             "select_hypothesis_champion": "select_hypothesis_champion",
         },
     )
-    graph.add_edge("select_hypothesis_champion", "planner_select_hypothesis")
+    graph.add_edge("select_hypothesis_champion", "hc_champion")
+    graph.add_conditional_edges(
+        "hc_champion",
+        route_after_hc_champion,
+        {
+            "planner_select_hypothesis": "planner_select_hypothesis",
+            "planner_final_champion": "planner_final_champion",
+        },
+    )
     graph.add_edge("planner_final_champion", "freeze_champion")
     graph.add_edge("freeze_champion", "qa_phase0")
     graph.add_conditional_edges(
