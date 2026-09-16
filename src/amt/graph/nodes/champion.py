@@ -121,7 +121,12 @@ def make_hc_champion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
                 "hypothesis_id": champions[-1].hypothesis_id,
                 "primary_metric": contract.primary_metric if contract else "",
                 "comparison": _comparison(state, champions, contract),
-                "cohort_deltas": dict(champions[-1].cohort_metrics or {}),
+                "cohort_deltas": _cohort_deltas(
+                    state.get("baseline_cohort_metrics") or {},
+                    champions[-1].cohort_metrics or {},
+                    contract.primary_metric if contract else "",
+                ),
+                "cohort_metrics": dict(champions[-1].cohort_metrics or {}),
                 "guardrails_passed": champions[-1].guardrails_passed,
                 "cohort_regressions": list(champions[-1].cohort_regressions or []),
                 "selection_rationale": champions[-1].selection_rationale,
@@ -154,6 +159,34 @@ def make_hc_champion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         return update
 
     return hc_champion_node
+
+
+def _cohort_deltas(
+    baseline: dict[str, dict[str, float]],
+    candidate: dict[str, dict[str, float]],
+    primary: str,
+) -> dict[str, dict[str, float]]:
+    """Candidate minus incumbent, per cohort, for the metrics both report.
+
+    The guardrail is "no cohort regresses more than X % relative", which needs
+    the incumbent's number for the same cohort. Without the baseline (a
+    campaign that predates this field) the deltas are empty and the payload's
+    ``cohort_metrics`` still carries the candidate's absolute values.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for cohort, metrics in candidate.items():
+        base = baseline.get(cohort) or {}
+        deltas: dict[str, float] = {}
+        for name, value in metrics.items():
+            if name in base and isinstance(value, (int, float)) and isinstance(base[name], (int, float)):
+                deltas[name] = float(value) - float(base[name])
+                if base[name] and name == primary:
+                    deltas[f"{name}_rel"] = (float(value) - float(base[name])) / float(base[name])
+        if "n_users" in metrics:
+            deltas["n_users"] = float(metrics["n_users"])
+        if deltas:
+            out[cohort] = deltas
+    return out
 
 
 def _comparison(state: CampaignState, champions: list, contract) -> list[dict]:

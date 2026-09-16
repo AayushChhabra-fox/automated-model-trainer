@@ -175,19 +175,59 @@ def shape_rows(payload: dict) -> list[dict[str, str]]:
     return rows
 
 
+#: Metric names that are bookkeeping, not evidence. Everything under
+#: `reproduction/` is the phase-0 subset (200 renders); the counts describe the
+#: split, not the model.
+_NOT_EVIDENCE_PREFIXES = ("reproduction/",)
+_NOT_EVIDENCE = frozenset({"n_users", "n_scored", "catalog_size"})
+
+
 def champion_rows(payload: dict) -> list[dict[str, str]]:
-    """This hypothesis's champion against the baseline and its predecessors."""
+    """This hypothesis's champion against the baseline and its predecessors.
+
+    Metrics down the side, models across — the primary metric first, then the
+    rest the contract asked for, then the pointwise diagnostics — and a delta
+    column for the newest champion against the baseline. A 27-column table with
+    `reproduction/mrr@1` in it is how a −5 % primary metric went unread.
+    """
+    comparison = list(payload.get("comparison") or [])
+    if not comparison:
+        return []
+    primary = str(payload.get("primary_metric") or "")
+    labels = [str(e.get("label") or "") for e in comparison]
+    metrics_by_label = {
+        str(e.get("label") or ""): dict(e.get("metrics") or {}) for e in comparison
+    }
+    baseline = metrics_by_label.get("baseline") or {}
+    latest = labels[-1] if labels[-1] != "baseline" else ""
+
+    def evidence(name: str) -> bool:
+        return name not in _NOT_EVIDENCE and not name.startswith(_NOT_EVIDENCE_PREFIXES)
+
+    seen: list[str] = []
+    for label in labels:
+        for name in metrics_by_label[label]:
+            if evidence(name) and name not in seen:
+                seen.append(name)
+    ranking = [n for n in seen if "@" in n]
+    pointwise = [n for n in seen if "@" not in n]
+    ordered = ([primary] if primary in seen else []) + [
+        n for n in ranking if n != primary
+    ] + pointwise
+
     rows = []
-    for entry in payload.get("comparison") or []:
-        rows.append(
-            {
-                "model": str(entry.get("label") or ""),
-                **{
-                    metric: f"{value:.5f}" if isinstance(value, (int, float)) else str(value)
-                    for metric, value in (entry.get("metrics") or {}).items()
-                },
-            }
-        )
+    for name in ordered:
+        row: dict[str, str] = {"metric": name}
+        for label in labels:
+            value = metrics_by_label[label].get(name)
+            row[label] = f"{value:.4f}" if isinstance(value, (int, float)) else "—"
+        if latest and isinstance(baseline.get(name), (int, float)):
+            cand = metrics_by_label[latest].get(name)
+            if isinstance(cand, (int, float)):
+                delta = float(cand) - float(baseline[name])
+                rel = delta / float(baseline[name]) if baseline[name] else float("nan")
+                row[f"Δ {latest} vs baseline"] = f"{delta:+.4f} ({rel:+.1%})"
+        rows.append(row)
     return rows
 
 

@@ -102,6 +102,9 @@ def make_run_baseline_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
             # need something to compare a champion against, and "beats the
             # incumbent" is the only comparison that means anything.
             "baseline_metrics": dict(result.validation_metrics or {}),
+            "baseline_cohort_metrics": {
+                k: dict(v) for k, v in (result.cohort_metrics or {}).items()
+            },
         }
         if deps.use_mlflow and not state.get("mlflow_experiment_id"):
             from amt.databricks.mlflow_client import get_or_create_experiment

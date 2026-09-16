@@ -104,6 +104,9 @@ class CampaignState(TypedDict, total=False):
     budget: ExperimentBudget
     hypothesis_champions: list[HypothesisChampion]
     baseline_metrics: dict[str, float]
+    #: The incumbent's per-cohort validation metrics, so HC_CHAMPION can show
+    #: candidate-minus-baseline per cohort rather than the candidate alone.
+    baseline_cohort_metrics: dict[str, dict[str, float]]
     # HC_CHAMPION: the operator read this hypothesis's champion, and whether
     # they asked to stop exploring and take it to QA.
     champion_reviewed: bool
@@ -184,6 +187,7 @@ def new_campaign_state(
         budget=budget or ExperimentBudget(),
         hypothesis_champions=[],
         baseline_metrics={},
+        baseline_cohort_metrics={},
         champion_reviewed=False,
         freeze_requested=False,
         frozen_champion=None,

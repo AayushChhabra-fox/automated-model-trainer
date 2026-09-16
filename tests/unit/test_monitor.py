@@ -144,3 +144,24 @@ def test_each_checklist_checkpoint_has_rows_and_the_others_do_not():
     )
     assert summary_rows({"checkpoint": "HC2"}) is None
     assert summary_rows({"checkpoint": "HC_FEATURE", "shapes": {}}) == []
+
+
+def test_the_champion_table_puts_the_primary_first_and_shows_the_delta():
+    from amt import monitor
+
+    rows = monitor.champion_rows(
+        {
+            "primary_metric": "ndcg@4",
+            "comparison": [
+                {
+                    "label": "baseline",
+                    "metrics": {"hitrate@1": 0.5, "ndcg@4": 0.8, "n_users": 10, "reproduction/ndcg@4": 0.9},
+                },
+                {"label": "H1", "metrics": {"ndcg@4": 0.76, "hitrate@1": 0.45, "auc": 0.6}},
+            ],
+        }
+    )
+
+    assert [r["metric"] for r in rows] == ["ndcg@4", "hitrate@1", "auc"], "primary first, no bookkeeping"
+    assert rows[0]["Δ H1 vs baseline"].startswith("-0.0400 (-5.0%)")
+    assert rows[2]["baseline"] == "—", "a diagnostic the incumbent does not have"
