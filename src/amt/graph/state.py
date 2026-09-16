@@ -14,7 +14,12 @@ from amt.schemas.common import ExperimentBudget, new_id, utcnow
 from amt.schemas.conclusion import ScientificConclusion
 from amt.schemas.evaluation_contract import EvaluationContract, SplitMaterialization
 from amt.schemas.experiment_config import ExperimentConfig
-from amt.schemas.feature_recipe import FeatureFitProposal, FeatureRecipe, FitSpec
+from amt.schemas.feature_recipe import (
+    ApprovedShape,
+    FeatureFitProposal,
+    FeatureRecipe,
+    FitSpec,
+)
 from amt.schemas.hypothesis import ExperimentPlan, Hypothesis
 from amt.schemas.problem_spec import ProblemSpec
 from amt.schemas.qa import Phase0Result, Phase1Result, QAAssessment, QADecision
@@ -72,13 +77,21 @@ class CampaignState(TypedDict, total=False):
     current_hypothesis_id: str | None
     experiment_plan: ExperimentPlan | None
     current_config: ExperimentConfig | None
-    # Feature/fit shape for the tabular families: proposed by the Planner, approved by a
-    # human once per hypothesis, and re-approved whenever the structural hash changes.
-    feature_fit_proposal: FeatureFitProposal | None
+    # Feature/fit shapes for the tabular families: the Planner proposes one per
+    # tabular hypothesis and a human approves the whole set at HC_FEATURE, once,
+    # before any hypothesis is planned. Keyed by hypothesis id.
+    feature_fit_proposals: dict[str, FeatureFitProposal]
+    shapes_approved: bool
+    approved_shapes: dict[str, ApprovedShape]
+    # The selected hypothesis's shape, copied out of `approved_shapes` so the
+    # Trainer, `assert_feature_fit_approved` and the executor read one shape.
     approved_feature_recipe: FeatureRecipe | None
     approved_fit_spec: FitSpec | None
     feature_fit_hash: str
     feature_fit_approved: bool
+    # Structural changes the Trainer asked for and did not get, for `status` to
+    # report: a clamped ask is invisible otherwise.
+    structural_asks_clamped: list[str]
     # Results for the *current* hypothesis only; cleared when its champion is selected.
     run_results: dict[str, Any]
     last_result: Any | None
@@ -141,11 +154,14 @@ def new_campaign_state(
         current_hypothesis_id=None,
         experiment_plan=None,
         current_config=None,
-        feature_fit_proposal=None,
+        feature_fit_proposals={},
+        shapes_approved=False,
+        approved_shapes={},
         approved_feature_recipe=None,
         approved_fit_spec=None,
         feature_fit_hash="",
         feature_fit_approved=False,
+        structural_asks_clamped=[],
         run_results={},
         last_result=None,
         last_interpretation=None,

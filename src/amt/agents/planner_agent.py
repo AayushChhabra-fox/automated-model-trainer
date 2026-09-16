@@ -6,7 +6,7 @@ from amt.agents.base import AgentBase
 from amt.schemas.champion import FinalChampionSelection, HypothesisChampion
 from amt.schemas.conclusion import ScientificConclusion
 from amt.schemas.evaluation_contract import EvaluationContract
-from amt.schemas.feature_recipe import FeatureFitProposal
+from amt.schemas.feature_recipe import ApprovedShape, FeatureFitProposal
 from amt.schemas.hypothesis import ExperimentPlan, Hypothesis, HypothesisBacklog
 from amt.schemas.problem_spec import ProblemSpec
 from amt.schemas.qa import Phase0Result, Phase1Result, QAAssessment
@@ -45,7 +45,13 @@ class PlannerAgent(AgentBase):
         contract: EvaluationContract,
         baseline_reference: str = "",
         history: list[RunSummary] | None = None,
+        shape: ApprovedShape | None = None,
     ) -> ExperimentPlan:
+        """Bound the Trainer for one hypothesis, under an already-approved shape.
+
+        ``shape`` is an input, not an output: HC_FEATURE runs before selection,
+        so the plan is written knowing what the model is allowed to see.
+        """
         agent = self.agent("planner.plan", "planner_plan", ExperimentPlan)
         plan = agent.invoke(
             {
@@ -54,33 +60,44 @@ class PlannerAgent(AgentBase):
                 "evaluation_contract": contract,
                 "baseline_reference": baseline_reference,
                 "experiment_history": [h.model_dump() for h in history or []],
+                "approved_shape": shape,
             }
         )
-        return plan.model_copy(
-            update={
-                "hypothesis_id": hypothesis.hypothesis_id,
-                "primary_metric": contract.primary_metric,
-                "contract_hash": contract.contract_hash,
-                "baseline_reference": plan.baseline_reference or baseline_reference,
+        stamped = {
+            "hypothesis_id": hypothesis.hypothesis_id,
+            "primary_metric": contract.primary_metric,
+            "contract_hash": contract.contract_hash,
+            "baseline_reference": plan.baseline_reference or baseline_reference,
+            "family": hypothesis.family or plan.family,
+        }
+        if shape is not None:
+            stamped |= {
+                "family": shape.family,
+                "feature_recipe": shape.feature_recipe,
+                "fit_spec": shape.fit_spec,
+                "feature_fit_hash": shape.feature_fit_hash,
             }
-        )
+        return plan.model_copy(update=stamped)
 
     def propose_feature_fit(
         self,
         hypothesis: Hypothesis,
-        plan: ExperimentPlan,
         spec: ProblemSpec,
         contract: EvaluationContract,
         family: str = "",
         previous: FeatureFitProposal | None = None,
         human_feedback: str | None = None,
     ) -> FeatureFitProposal:
-        """Declare what goes into a tabular model. Presented for human approval."""
+        """Declare what goes into a tabular model. Presented for human approval.
+
+        Takes no ``ExperimentPlan``: this runs before any hypothesis is planned,
+        and the plan never carried anything the recipe needs that the
+        hypothesis and the contract do not.
+        """
         agent = self.agent("planner.feature_fit", "planner_feature_fit", FeatureFitProposal)
         proposal = agent.invoke(
             {
                 "hypothesis": hypothesis,
-                "experiment_plan": plan,
                 "problem_spec": spec,
                 "data_sources": [d.model_dump() for d in spec.data_sources],
                 "train_split": contract.train_split,

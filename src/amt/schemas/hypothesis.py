@@ -30,6 +30,10 @@ class Hypothesis(AmtModel):
     # (6) what result would weaken or falsify it
     falsification_criteria: str
 
+    # The family is chosen here, not at planning time: HC_FEATURE reviews every
+    # tabular shape in the backlog at once, so it has to know which hypotheses
+    # are tabular before any of them is planned.
+    family: str = Field(default="", description="Model family this hypothesis proposes to test.")
     expected_effect_size: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     estimated_cost_minutes: float = Field(default=30.0, ge=0.0)

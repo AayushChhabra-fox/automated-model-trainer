@@ -19,59 +19,74 @@ from amt.schemas.feature_recipe import FitSpec, feature_fit_hash, is_tabular_fam
 from amt.schemas.run_result import RunSummary
 
 
-def _bind_feature_fit(state: CampaignState, config: ExperimentConfig) -> ExperimentConfig:
-    """Pin a config to the approved feature/fit shape.
+def _structural_asks(approved: FitSpec, proposed: FitSpec | None) -> list[str]:
+    """FitSpec fields where the Trainer asked for something it will not get.
 
-    Non-tabular families carry no recipe at all. For a tabular family the approved
-    recipe and the structural part of the approved FitSpec always win; the Trainer's
-    contribution is ``booster_params``. When the Trainer asks for a structurally
-    different shape the config keeps that ask, its hash stops matching the approved
-    one, and routing sends the campaign back to the feature/fit checkpoint.
+    A blank is not an ask. The Trainer routinely omits ``objective`` and
+    ``eval_metric``, and those inherit the approved values rather than being
+    reported as drift — which is the whole of B2.
+    """
+    if proposed is None:
+        return []
+    approved_payload = approved.structural_payload
+    return [
+        f"fit_spec.{field}={value!r} (kept {approved_payload.get(field)!r})"
+        for field, value in proposed.structural_payload.items()
+        if value not in ("", None) and value != approved_payload.get(field)
+    ]
+
+
+def _bind_feature_fit(
+    state: CampaignState, config: ExperimentConfig
+) -> tuple[ExperimentConfig, list[str]]:
+    """Pin a config to the approved feature/fit shape, and say what was refused.
+
+    Non-tabular families carry no recipe at all. For a tabular family the shape
+    a human approved *always* wins and the Trainer's only contribution is
+    ``booster_params``: a structural ask is recorded and discarded, not routed
+    back to the checkpoint. The bounce loop that used to live here cost eight
+    review rounds and no compute, and the approved shape won every time anyway.
+
+    Returns the bound config and the asks that were clamped.
     """
     if not is_tabular_family(config.family):
-        return config.model_copy(
-            update={"feature_recipe": None, "fit_spec": None, "feature_fit_hash": ""}
+        return (
+            config.model_copy(
+                update={"feature_recipe": None, "fit_spec": None, "feature_fit_hash": ""}
+            ),
+            [],
         )
 
     recipe = state.get("approved_feature_recipe")
-    approved_fit = state.get("approved_fit_spec") or FitSpec()
     if recipe is None or not state.get("feature_fit_approved"):
-        # Nothing approved yet: record what was asked for and let routing gate it.
-        return config.model_copy(
-            update={"feature_fit_hash": feature_fit_hash(config.feature_recipe, config.fit_spec)}
+        raise ContractViolation(
+            f"family {config.family!r} needs an approved feature/fit shape and "
+            "state carries none; HC_FEATURE runs before selection, so the "
+            "Trainer can never legitimately be the first to ask for one."
         )
+    approved_fit = state.get("approved_fit_spec") or FitSpec()
 
-    proposed = config.fit_spec
-    requested_recipe = config.feature_recipe
-    structural_change = (
-        requested_recipe is not None
-        and requested_recipe.structural_payload != recipe.structural_payload
-    ) or (
-        proposed is not None
-        and proposed.structural_payload != approved_fit.structural_payload
-    )
-    if structural_change:
-        return config.model_copy(
-            update={
-                "feature_recipe": requested_recipe or recipe,
-                "fit_spec": proposed or approved_fit,
-                "feature_fit_hash": feature_fit_hash(
-                    requested_recipe or recipe, proposed or approved_fit
-                ),
-            }
-        )
+    clamped = _structural_asks(approved_fit, config.fit_spec)
+    if (
+        config.feature_recipe is not None
+        and config.feature_recipe.structural_payload != recipe.structural_payload
+    ):
+        clamped.insert(0, "feature_recipe (kept the approved recipe)")
 
     fit = approved_fit
-    if proposed is not None:
+    if config.fit_spec is not None:
         fit = approved_fit.model_copy(
-            update={"booster_params": dict(proposed.booster_params)}
+            update={"booster_params": dict(config.fit_spec.booster_params)}
         )
-    return config.model_copy(
-        update={
-            "feature_recipe": recipe,
-            "fit_spec": fit,
-            "feature_fit_hash": feature_fit_hash(recipe, fit),
-        }
+    return (
+        config.model_copy(
+            update={
+                "feature_recipe": recipe,
+                "fit_spec": fit,
+                "feature_fit_hash": feature_fit_hash(recipe, fit),
+            }
+        ),
+        clamped,
     )
 
 
@@ -93,16 +108,17 @@ def make_trainer_propose_node(deps: NodeDeps) -> Callable[[CampaignState], dict]
             last_result=state.get("last_result"),
             last_interpretation=state.get("last_interpretation"),
         )
-        config = _bind_feature_fit(state, config)
+        config, clamped = _bind_feature_fit(state, config)
         update: dict = {
             "stage": Stage.TRAINING.value,
             "current_config": config,
         }
-        if is_tabular_family(config.family) and config.feature_fit_hash != (
-            state.get("feature_fit_hash") or ""
-        ):
-            # The approved shape no longer covers this config.
-            update["feature_fit_approved"] = False
+        if clamped:
+            iteration = int(state.get("iteration", 0) or 0) + 1
+            update["structural_asks_clamped"] = [
+                *(state.get("structural_asks_clamped") or []),
+                *(f"{hypothesis.hypothesis_id} it{iteration}: {ask}" for ask in clamped),
+            ]
         return update
 
     return trainer_propose_node

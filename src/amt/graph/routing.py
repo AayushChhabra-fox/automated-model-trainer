@@ -62,18 +62,16 @@ def target_family(state: CampaignState) -> str:
 
 
 def feature_fit_needed(state: CampaignState) -> bool:
-    """True when a tabular family has no approved feature/fit shape to run under."""
+    """True when a tabular family has no approved feature/fit shape to run under.
+
+    Nothing routes on this any more. HC_FEATURE approves every tabular shape in
+    the backlog before the first hypothesis is planned, and Trainer drift is
+    clamped to the approved shape rather than bounced back to the gate, so a
+    true answer here is a bug and the caller raises.
+    """
     if not is_tabular_family(target_family(state)):
         return False
-    if not state.get("feature_fit_approved") or not state.get("feature_fit_hash"):
-        return True
-    config = state.get("current_config")
-    if config is None:
-        return False
-    # The Trainer may retune hyperparameters, never the approved shape.
-    return bool(
-        config.feature_fit_hash and config.feature_fit_hash != state.get("feature_fit_hash")
-    )
+    return not (state.get("feature_fit_approved") and state.get("feature_fit_hash"))
 
 
 def assert_feature_fit_approved(state: CampaignState) -> None:
@@ -134,8 +132,18 @@ def route_after_hc_contract(state: CampaignState) -> str:
 
 
 def route_after_hc_hypotheses(state: CampaignState) -> str:
-    """HC_BACKLOG: rejected → revise the backlog; approved → plan the first hypothesis."""
-    return "planner_select_hypothesis" if state.get("hypotheses_approved") else "planner_hypotheses"
+    """HC_BACKLOG: rejected → revise; approved → review shapes, or plan straight away.
+
+    A backlog with nothing tabular in it never sees HC_FEATURE: there is no
+    shape to approve, and interrupting on an empty document is how an operator
+    learns to approve without reading.
+    """
+    if not state.get("hypotheses_approved"):
+        return "planner_hypotheses"
+    tabular = any(
+        h.status == "pending" and is_tabular_family(h.family) for h in state.get("hypotheses") or []
+    )
+    return "planner_feature_fit" if tabular else "planner_select_hypothesis"
 
 
 def route_after_planner_select(state: CampaignState) -> str:
@@ -143,18 +151,24 @@ def route_after_planner_select(state: CampaignState) -> str:
     if not state.get("current_hypothesis_id"):
         return "planner_final_champion"
     if feature_fit_needed(state):
-        return "planner_feature_fit"
+        raise ContractViolation(
+            "A tabular hypothesis reached the Trainer with no approved shape. "
+            "HC_FEATURE approves every shape before selection, so there is "
+            "nothing a human can approve to fix this; the selection node is wrong."
+        )
     return "trainer_propose"
 
 
 def route_after_hc_feature_fit(state: CampaignState) -> str:
-    """HC_FEATURE: rejected → redraft the shape; approved → let the Trainer tune it."""
-    return "trainer_propose" if state.get("feature_fit_approved") else "planner_feature_fit"
+    """HC_FEATURE: rejected → redraft every shape; approved → plan the first hypothesis.
 
-
-def route_after_trainer_propose(state: CampaignState) -> str:
-    """A config that changes the approved shape goes back for re-approval, not to compute."""
-    return "planner_feature_fit" if feature_fit_needed(state) else "execute_training"
+    Approval covers the whole backlog, so the next step is selection rather
+    than the Trainer: which hypothesis runs first is still the Planner's call.
+    Striking every shape out is an approval, not a rejection — the operator
+    decided none of them is worth compute, and the campaign continues with
+    whatever non-tabular hypotheses are left.
+    """
+    return "planner_select_hypothesis" if state.get("shapes_approved") else "planner_feature_fit"
 
 
 def _plan_max_iterations(state: CampaignState) -> int:

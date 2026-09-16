@@ -68,6 +68,9 @@ class LocalMockExecutor:
         self.expected_contract_hash = expected_contract_hash
         self.calls: list[str] = []
         self.training_calls: list[str] = []
+        #: Every config that reached compute, so a test can assert what the
+        #: clamp let through rather than only what the orchestrator kept.
+        self.training_configs: list[ExperimentConfig] = []
         self.phase0_attempts = 0
         self.qa_split_reads = 0
         self._iteration: dict[str, int] = {}
@@ -152,6 +155,7 @@ class LocalMockExecutor:
         self._check(contract)
         self.calls.append("run_training")
         self.training_calls.append(config.config_hash)
+        self.training_configs.append(config)
         key = plan.hypothesis_id or config.hypothesis_id or "default"
         i = self._iteration.get(key, 0)
         self._iteration[key] = i + 1

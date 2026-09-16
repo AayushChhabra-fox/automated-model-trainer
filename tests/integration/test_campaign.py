@@ -6,6 +6,7 @@ import pytest
 from langgraph.types import Command
 
 from amt.executor.local_mock import LocalMockExecutor
+from amt.graph.routing import ContractViolation
 from amt.graph.state import new_campaign_state
 from amt.schemas.champion import FrozenChampion
 from amt.schemas.qa import Phase0Result, QADecision
@@ -315,21 +316,24 @@ def test_a_booster_campaign_must_pass_the_feature_checkpoint_before_training(cam
     graph, config, executor, responder = campaign(family="lightgbm_reranker")
     hc4, hc_feature = run_tabular_to_hc4(graph, config)
 
-    payload = hc_feature["feature_fit"]
-    assert payload["family"] == "lightgbm_reranker"
-    assert payload["feature_recipe"]["feature_columns"]
-    assert hc_feature["feature_fit_hash"]
+    shape = hc_feature["shapes"]["hyp-1"]
+    assert shape["family"] == "lightgbm_reranker"
+    assert shape["feature_recipe"]["feature_columns"]
+    # `candidate_generation` and `fit_spec` lead the document, because they are
+    # what a reviewer decides on and used to sit below the preview cut.
+    assert list(shape)[:4] == ["title", "feature_fit_hash", "fit_spec", "candidate_generation"]
 
     assert hc4 and hc4["checkpoint"] == "HC4"
     state = graph_state(graph, config)
+    assert state["shapes_approved"] is True
     assert state["feature_fit_approved"] is True
-    assert state["feature_fit_hash"] == hc_feature["feature_fit_hash"]
+    assert state["feature_fit_hash"] == shape["feature_fit_hash"]
     # Every run went out under the approved shape, and the recipe reached the executor.
     assert len(executor.training_calls) == 3
     champion_config = state["frozen_champion"].config
     assert champion_config.family == "lightgbm_reranker"
     assert champion_config.feature_recipe is not None
-    assert champion_config.feature_fit_hash == hc_feature["feature_fit_hash"]
+    assert champion_config.feature_fit_hash == shape["feature_fit_hash"]
 
 
 def test_rejecting_a_shape_redrafts_it_and_blocks_training(campaign):
@@ -357,8 +361,88 @@ def test_hyperparameter_only_iterations_do_not_reopen_the_checkpoint(campaign):
 
 
 def test_the_fixed_shape_families_never_reach_the_feature_checkpoint(campaign):
-    graph, config, executor, responder = campaign(family="sasrec")
-    hc4 = run_to_hc4(graph, config)
-    assert hc4 and hc4["checkpoint"] == "HC4"
+    """A SASRec-only backlog has no shape to approve, so the gate must not fire."""
+    graph, config, executor, responder = campaign(family="sasrec", n_hypotheses=3)
+
+    hc2 = start(graph, config)
+    assert hc2["checkpoint"] == "HC2"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC3"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC_BACKLOG"
+    # Straight from the backlog to the conclusion: one interrupt, not two.
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC4"
+
     assert "feature_fit" not in responder.counts
-    assert graph_state(graph, config)["feature_fit_hash"] == ""
+    state = graph_state(graph, config)
+    assert state["feature_fit_hash"] == ""
+    assert state["approved_shapes"] == {}
+
+
+# --- the batched gate: one review of every shape, drift clamped -------------------------------
+def test_one_review_covers_every_shape_and_the_checklist_strikes_out_the_rest(campaign):
+    """Three hypotheses, one struck at each gate, and a Trainer ask refused in place.
+
+    This is the whole gate redesign in one campaign: the operator answers two
+    checkpoints between HC3 and HC4 rather than one per hypothesis plus a
+    bounce round per structural ask.
+    """
+    graph, config, executor, responder = campaign(
+        family="lightgbm_reranker", n_hypotheses=3, structural_drift_on_iteration=2
+    )
+
+    assert start(graph, config)["checkpoint"] == "HC2"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC3"
+    backlog = resume(graph, config, approved=True)
+    assert backlog["checkpoint"] == "HC_BACKLOG"
+
+    # Strike hyp-3 here; hyp-1 and hyp-2 go on to the shape review.
+    shapes = resume(graph, config, approved=True, drop=["hyp-3"])
+    assert shapes["checkpoint"] == "HC_FEATURE"
+    assert sorted(shapes["shapes"]) == ["hyp-1", "hyp-2"], "the dropped one is not proposed for"
+    assert responder.counts["feature_fit"] == 2, "one proposal per surviving hypothesis"
+
+    # Strike hyp-2's shape; only hyp-1 gets compute. The next stop is HC4.
+    hc4 = resume(graph, config, approved=True, keep=["hyp-1"])
+    assert hc4 and hc4["checkpoint"] == "HC4", "exactly two interrupts between HC3 and HC4"
+
+    state = graph_state(graph, config)
+    assert {h.hypothesis_id: h.status for h in state["hypotheses"]} == {
+        "hyp-1": "converged",
+        "hyp-2": "abandoned",
+        "hyp-3": "abandoned",
+    }
+    assert list(state["approved_shapes"]) == ["hyp-1"]
+    assert len(state["hypothesis_champions"]) == 1
+
+    # The Trainer asked for a wider recipe and another objective on iteration 2
+    # and got neither; every run went out under the one approved hash.
+    approved_hash = state["feature_fit_hash"]
+    clamped = state["structural_asks_clamped"]
+    assert any("feature_recipe" in ask for ask in clamped)
+    assert any("rank:pairwise" in ask for ask in clamped)
+    assert all(ask.startswith("hyp-1 it2:") for ask in clamped)
+    assert {c.feature_fit_hash for c in executor.training_configs} == {approved_hash}
+    assert all(
+        "smuggled_bias" not in {t.name for t in c.feature_recipe.feature_columns}
+        for c in executor.training_configs
+    )
+
+
+def test_striking_out_every_shape_spends_nothing_and_freezes_nothing(campaign):
+    """ "None of these is worth compute" is an approval of an empty set, not a rejection.
+
+    The campaign then has no champion to freeze, and says so rather than
+    redrafting shapes the operator already refused.
+    """
+    graph, config, executor, responder = campaign(family="xgboost_reranker", n_hypotheses=2)
+
+    assert start(graph, config)["checkpoint"] == "HC2"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC3"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC_BACKLOG"
+    assert resume(graph, config, approved=True)["checkpoint"] == "HC_FEATURE"
+
+    with pytest.raises(ContractViolation, match="nothing to freeze"):
+        resume(graph, config, approved=True, drop=["hyp-1", "hyp-2"])
+
+    assert executor.training_calls == []
+    # One gate round, one proposal per hypothesis, and no redraft.
+    assert responder.counts["feature_fit"] == 2

@@ -102,6 +102,7 @@ class CannedResponder:
         n_hypotheses: int = 1,
         probe_steps: int = 2,
         family: str = "sasrec",
+        structural_drift_on_iteration: int = 0,
     ) -> None:
         self.qa_outcome: QaOutcome = qa_outcome
         self.converge_after = converge_after
@@ -110,6 +111,9 @@ class CannedResponder:
         # Which family the canned planner/trainer aim at; a tabular one exercises
         # the feature/fit checkpoint.
         self.family = family
+        # On this config call the Trainer asks for a wider recipe and a different
+        # objective -- the ask the clamp exists to refuse.
+        self.structural_drift_on_iteration = structural_drift_on_iteration
         self.calls: list[str] = []
         self.counts: dict[str, int] = {}
 
@@ -309,6 +313,7 @@ class CannedResponder:
                     f"No meaningful {PRIMARY_METRIC} gain over the popularity baseline, "
                     "or a cold-start regression."
                 ),
+                family=self.family,
                 expected_effect_size="+0.02 to +0.05 NDCG@10",
                 confidence=0.6 - 0.1 * i,
                 priority=i + 1,
@@ -341,39 +346,43 @@ class CannedResponder:
             family=self.family,
         )
 
+    def _recipe(self, revision: int = 1, extra: list[FeatureTransform] | None = None):
+        return FeatureRecipe(
+            sources=[
+                RecipeSource(name="interactions", role="interactions", split="train"),
+                RecipeSource(
+                    name="item_attrs",
+                    role="item_attributes",
+                    split="train",
+                    columns=["event_type"],
+                    join_keys=["item_id"],
+                ),
+            ],
+            joins=[RecipeJoin(source="item_attrs", keys=["item_id"])],
+            feature_columns=[
+                FeatureTransform(name="item_popularity", kind="count", of="item_id", over="train"),
+                FeatureTransform(name="history_length", kind="column", source="history_length"),
+                FeatureTransform(
+                    name="type_affinity", kind="count", of="event_type", over="history"
+                ),
+            ]
+            + (
+                [FeatureTransform(name="item_rank", kind="column", source="item_train_rank")]
+                if revision > 1
+                else []
+            )
+            + list(extra or []),
+            label=LabelSpec(strategy="holdout_next_item", definition="last train start"),
+            group_key="user_id",
+            candidate_generation=CandidateGeneration(strategy="popularity_topn", n=200),
+            leakage_notes="Every feature is computable from history plus the candidate.",
+        )
+
     def _feature_fit(self, text: str) -> FeatureFitProposal:
         revision = self._bump("feature_fit")
         return FeatureFitProposal(
             family=self.family,
-            feature_recipe=FeatureRecipe(
-                sources=[
-                    RecipeSource(name="interactions", role="interactions", split="train"),
-                    RecipeSource(
-                        name="item_attrs",
-                        role="item_attributes",
-                        split="train",
-                        columns=["event_type"],
-                        join_keys=["item_id"],
-                    ),
-                ],
-                joins=[RecipeJoin(source="item_attrs", keys=["item_id"])],
-                feature_columns=[
-                    FeatureTransform(name="item_popularity", kind="count", of="item_id", over="train"),
-                    FeatureTransform(name="history_length", kind="column", source="history_length"),
-                    FeatureTransform(
-                        name="type_affinity", kind="count", of="event_type", over="history"
-                    ),
-                ]
-                + (
-                    [FeatureTransform(name="item_rank", kind="column", source="item_train_rank")]
-                    if revision > 1
-                    else []
-                ),
-                label=LabelSpec(strategy="holdout_next_item", definition="last train start"),
-                group_key="user_id",
-                candidate_generation=CandidateGeneration(strategy="popularity_topn", n=200),
-                leakage_notes="Every feature is computable from history plus the candidate.",
-            ),
+            feature_recipe=self._recipe(revision),
             fit_spec=FitSpec(
                 num_boost_round=200,
                 early_stopping_rounds=20,
@@ -384,18 +393,27 @@ class CannedResponder:
             leakage_argument="No feature reads the labelled event or anything after it.",
         )
 
+    def _drifted_recipe(self) -> FeatureRecipe:
+        """One feature wider than the shape the human approved."""
+        return self._recipe(
+            extra=[FeatureTransform(name="smuggled_bias", kind="literal", value=1.0)]
+        )
+
     # --- Stage 4/6/7 ----------------------------------------------------------------
     def _config(self, text: str) -> ExperimentConfig:
         i = self._bump("config")
         if self.family != "sasrec":
+            drifting = i == self.structural_drift_on_iteration
             return ExperimentConfig(
                 family=self.family,
                 model={"max_depth": 4 + i},
                 training={"learning_rate": 0.1 / i},
+                feature_recipe=self._drifted_recipe() if drifting else None,
                 fit_spec=FitSpec(
-                    num_boost_round=200,
+                    num_boost_round=900 if drifting else 200,
                     early_stopping_rounds=20,
                     negative_samples_per_positive=4,
+                    objective="rank:pairwise" if drifting else "",
                     booster_params={"learning_rate": 0.1 / i, "max_depth": 4 + i},
                 ),
                 rationale="Retune depth and learning rate inside the approved shape.",
@@ -567,6 +585,7 @@ def mock_stack(
     converge_after: int = 3,
     n_hypotheses: int = 1,
     family: str = "sasrec",
+    structural_drift_on_iteration: int = 0,
 ) -> tuple[LocalMockExecutor, Callable[[str], FakeLLM], CannedResponder]:
     """``(executor, llm_factory, responder)`` configured consistently for a dry run."""
     responder = CannedResponder(
@@ -574,6 +593,7 @@ def mock_stack(
         converge_after=converge_after,
         n_hypotheses=n_hypotheses,
         family=family,
+        structural_drift_on_iteration=structural_drift_on_iteration,
     )
     executor = LocalMockExecutor(
         qa_outcome=qa_outcome,

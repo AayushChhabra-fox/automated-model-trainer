@@ -105,6 +105,7 @@ def campaign(settings: Settings):
         n_hypotheses: int = 1,
         executor: Any | None = None,
         family: str = "sasrec",
+        structural_drift_on_iteration: int = 0,
     ):
         mock_executor, llm_factory, canned = mock_stack(
             qa_outcome=qa_outcome,  # type: ignore[arg-type]
@@ -112,6 +113,7 @@ def campaign(settings: Settings):
             converge_after=converge_after,
             n_hypotheses=n_hypotheses,
             family=family,
+            structural_drift_on_iteration=structural_drift_on_iteration,
         )
         executor = executor or mock_executor
         graph = build_graph(

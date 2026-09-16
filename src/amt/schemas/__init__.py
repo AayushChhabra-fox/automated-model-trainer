@@ -30,6 +30,7 @@ from amt.schemas.experiment_config import ExperimentConfig
 from amt.schemas.feature_recipe import (
     RANKER_FAMILIES,
     TABULAR_FAMILIES,
+    ApprovedShape,
     CandidateGeneration,
     FeatureFitProposal,
     FeatureRecipe,
@@ -75,6 +76,7 @@ __all__ = [
     "TABULAR_FAMILIES",
     "AcceptanceCriteria",
     "AmtModel",
+    "ApprovedShape",
     "BaselineDefinition",
     "CandidateGeneration",
     "CohortDef",

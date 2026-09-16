@@ -113,6 +113,9 @@ def _report_position(graph: Any, campaign: str) -> None:
     state = _state(graph, campaign)
     if payload:
         body, truncated = _render_checkpoint(payload)
+        overview = summarize(payload)
+        if overview is not None:
+            console.print(overview)
         console.print(
             Panel(
                 body,
@@ -136,7 +139,8 @@ def _report_position(graph: Any, campaign: str) -> None:
 
 #: A checkpoint document can run to hundreds of KB once probe rows are included, which
 #: no terminal panel can usefully show. The panel is a preview; `amt show` is the review.
-PREVIEW_CHARS = 8000
+#: 8 000 cut off the fit spec and the candidate budget on a real backlog.
+PREVIEW_CHARS = 20_000
 
 
 def _clip(text: str) -> tuple[str, bool]:
@@ -148,7 +152,13 @@ def _clip(text: str) -> tuple[str, bool]:
 
 def checkpoint_document(payload: dict) -> Any:
     """The part of an interrupt payload a human actually decides on."""
-    for key in ("problem_spec", "evaluation_contract", "hypotheses", "feature_fit", "conclusion"):
+    for key in (
+        "problem_spec",
+        "evaluation_contract",
+        "hypotheses",
+        "shapes",
+        "conclusion",
+    ):
         if payload.get(key):
             return payload[key]
     return payload
@@ -156,6 +166,99 @@ def checkpoint_document(payload: dict) -> Any:
 
 def _render_checkpoint(payload: dict) -> tuple[str, bool]:
     return _clip(json.dumps(checkpoint_document(payload), indent=2, default=str))
+
+
+#: The six FitSpec fields a reviewer has to see. Not the booster params: those
+#: are the Trainer's to change without asking.
+FIT_FIELDS = (
+    "objective",
+    "eval_metric",
+    "num_boost_round",
+    "early_stopping_rounds",
+    "negative_samples_per_positive",
+    "seed",
+)
+
+
+def backlog_rows(payload: dict) -> list[dict[str, str]]:
+    """One row per hypothesis: what it targets, what it costs, whether it is alive."""
+    return [
+        {
+            "id": str(h.get("hypothesis_id") or ""),
+            "title": str(h.get("title") or ""),
+            "family": str(h.get("family") or "—"),
+            "metric": str(h.get("metric_expected_to_improve") or ""),
+            "expected effect": str(h.get("expected_effect_size") or ""),
+            "cost": f"{h.get('estimated_cost_minutes') or 0:.0f}m",
+            "status": str(h.get("status") or ""),
+        }
+        for h in payload.get("hypotheses") or []
+    ]
+
+
+def shape_rows(payload: dict) -> list[dict[str, str]]:
+    """One row per feature/fit shape, priced.
+
+    The candidate-row estimate is the number this gate exists to catch: a
+    plausible-looking ``n`` against a 44 000-row validation split is 8.9M rows
+    of feature building, and nothing else in the payload says so.
+    """
+    validation_rows = int(payload.get("validation_rows") or 0)
+    duplicates = payload.get("duplicate_shapes") or {}
+    rows = []
+    for hypothesis_id, shape in sorted((payload.get("shapes") or {}).items()):
+        candidates = shape.get("candidate_generation") or {}
+        fit = shape.get("fit_spec") or {}
+        n = int(candidates.get("n") or 0)
+        estimated = validation_rows * n
+        notes = []
+        if duplicates.get(hypothesis_id):
+            notes.append(f"same shape as {', '.join(duplicates[hypothesis_id])}")
+        if not (shape.get("feature_recipe") or {}).get("feature_columns"):
+            notes.append("no feature columns")
+        rows.append(
+            {
+                "id": hypothesis_id,
+                "family": str(shape.get("family") or ""),
+                "candidates": f"{candidates.get('strategy') or '?'} n={n}",
+                "est. rows": f"{estimated:,}" if estimated else "unknown",
+                "fit": "\n".join(
+                    f"{key}={fit.get(key)}" for key in FIT_FIELDS if fit.get(key) not in ("", None)
+                ),
+                "notes": "\n".join(notes),
+            }
+        )
+    return rows
+
+
+def summarize(payload: dict) -> Any:
+    """A few lines answering what a reviewer asks before reading the JSON.
+
+    The JSON below it is the document of record; this is the part that decides
+    whether to read it. ``None`` when a checkpoint has nothing worth
+    summarizing separately.
+    """
+    checkpoint = str(payload.get("checkpoint") or "")
+    if checkpoint == "HC_BACKLOG":
+        rows = backlog_rows(payload)
+        return _table("hypothesis backlog", rows, drop=("title",))
+    if checkpoint == "HC_FEATURE":
+        return _table("feature/fit shapes", shape_rows(payload))
+    return None
+
+
+def _table(title: str, rows: list[dict[str, str]], drop: tuple[str, ...] = ()) -> Table:
+    """Render row dicts as a Rich table, one column per key."""
+    table = Table(title=title, header_style="bold", show_lines=True)
+    columns = [key for key in (rows[0] if rows else {}) if key not in drop]
+    for column in columns:
+        table.add_column(column, overflow="fold")
+    for row in rows:
+        values = [row.get(column, "") for column in columns]
+        if row.get("status") not in (None, "", "pending"):
+            values = [f"[red]{value}[/red]" for value in values]
+        table.add_row(*values)
+    return table
 
 
 # --- commands ----------------------------------------------------------------------
@@ -189,10 +292,19 @@ def start(
 @app.command()
 def approve(
     campaign: str = typer.Argument(..., help="Campaign id."),
+    keep: str = typer.Option(
+        "", "--keep", help="Comma-separated ids to keep; anything else under review is dropped."
+    ),
+    drop: str = typer.Option("", "--drop", help="Comma-separated ids to abandon."),
     mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
 ) -> None:
-    """Approve the current human checkpoint and continue."""
-    _resume(campaign, {"approved": True}, mock)
+    """Approve the current human checkpoint and continue.
+
+    At HC_BACKLOG and HC_FEATURE this is a checklist: `--keep` also sets the
+    order the kept items run in, and `--drop` abandons an item without paying
+    for the agent to rewrite the whole list.
+    """
+    _resume(campaign, {"approved": True, "keep": keep, "drop": drop}, mock)
 
 
 @app.command()

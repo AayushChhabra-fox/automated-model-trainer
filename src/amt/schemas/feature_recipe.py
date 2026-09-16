@@ -283,6 +283,28 @@ class FeatureFitProposal(AmtModel):
         return feature_fit_hash(self.feature_recipe, self.fit_spec)
 
 
+class ApprovedShape(AmtModel):
+    """One hypothesis's feature/fit shape, as a human approved it at HC_FEATURE.
+
+    The campaign keeps one of these per tabular hypothesis, approved before any
+    hypothesis is planned. ``planner_select_hypothesis`` copies the selected
+    one into the state keys the Trainer and the executor already read, so
+    nothing downstream of selection knows the gate became batched.
+    """
+
+    hypothesis_id: str
+    family: str
+    feature_recipe: FeatureRecipe
+    fit_spec: FitSpec = Field(default_factory=FitSpec)
+    approved_at_hash: str = Field(
+        default="", description="contract_hash the shape was approved under."
+    )
+
+    @property
+    def feature_fit_hash(self) -> str:
+        return feature_fit_hash(self.feature_recipe, self.fit_spec)
+
+
 def is_tabular_family(family: str | None) -> bool:
     return str(family or "").strip().lower() in TABULAR_FAMILIES
 

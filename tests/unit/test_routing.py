@@ -201,18 +201,55 @@ def _approved_state(contract, family="lightgbm_reranker", **overrides):
     return state
 
 
-def test_a_tabular_plan_goes_to_the_feature_checkpoint_before_training(evaluation_contract):
-    from amt.graph.routing import route_after_planner_select
+def _hypothesis(hypothesis_id="hyp-1", family="", status="pending"):
+    from amt.schemas.hypothesis import Hypothesis
 
-    state = base_state(
-        evaluation_contract,
-        current_hypothesis_id="hyp-1",
-        experiment_plan=plan().model_copy(update={"family": "xgboost_classifier"}),
+    return Hypothesis(
+        hypothesis_id=hypothesis_id,
+        title="t",
+        proposed_change="c",
+        why_it_should_improve="w",
+        motivating_evidence="e",
+        experiment_design="d",
+        metric_expected_to_improve="ndcg@10",
+        falsification_criteria="f",
+        family=family,
+        status=status,
     )
-    assert route_after_planner_select(state) == "planner_feature_fit"
 
 
-def test_the_fixed_shape_families_skip_the_feature_checkpoint(evaluation_contract):
+def test_a_tabular_backlog_reviews_every_shape_before_anything_is_planned():
+    state = {
+        "hypotheses_approved": True,
+        "hypotheses": [
+            _hypothesis("hyp-1", "sasrec"),
+            _hypothesis("hyp-2", "xgboost_classifier"),
+        ],
+    }
+    assert route_after_hc_hypotheses(state) == "planner_feature_fit"
+
+
+def test_a_backlog_with_nothing_tabular_never_sees_the_feature_checkpoint():
+    """Interrupting on an empty shape document teaches approving without reading."""
+    state = {
+        "hypotheses_approved": True,
+        "hypotheses": [_hypothesis("hyp-1", "sasrec"), _hypothesis("hyp-2", "popularity")],
+    }
+    assert route_after_hc_hypotheses(state) == "planner_select_hypothesis"
+
+
+def test_a_dropped_tabular_hypothesis_no_longer_pulls_in_the_gate():
+    state = {
+        "hypotheses_approved": True,
+        "hypotheses": [
+            _hypothesis("hyp-1", "sasrec"),
+            _hypothesis("hyp-2", "lightgbm_reranker", status="abandoned"),
+        ],
+    }
+    assert route_after_hc_hypotheses(state) == "planner_select_hypothesis"
+
+
+def test_the_fixed_shape_families_need_no_approved_shape(evaluation_contract):
     from amt.graph.routing import route_after_planner_select
 
     for family in ("", "popularity", "sasrec"):
@@ -225,57 +262,32 @@ def test_the_fixed_shape_families_skip_the_feature_checkpoint(evaluation_contrac
 
 
 def test_an_approved_shape_goes_straight_to_the_trainer(evaluation_contract):
-    from amt.graph.routing import route_after_planner_select, route_after_trainer_propose
+    from amt.graph.routing import route_after_planner_select
 
-    state = _approved_state(evaluation_contract, current_config=None)
-    assert route_after_planner_select(state) == "trainer_propose"
-    assert route_after_trainer_propose(_approved_state(evaluation_contract)) == "execute_training"
-
-
-def test_retuning_hyperparameters_does_not_need_re_approval(evaluation_contract):
-    from amt.graph.routing import route_after_trainer_propose
-
-    state = _approved_state(evaluation_contract)
-    config = state["current_config"]
-    state["current_config"] = config.model_copy(
-        update={
-            "fit_spec": config.fit_spec.model_copy(
-                update={"booster_params": {"learning_rate": 0.01, "max_depth": 9}}
-            ),
-            "model": {"max_depth": 9},
-        }
+    assert (
+        route_after_planner_select(_approved_state(evaluation_contract, current_config=None))
+        == "trainer_propose"
     )
-    assert route_after_trainer_propose(state) == "execute_training"
 
 
-def test_changing_the_shape_returns_to_the_feature_checkpoint(evaluation_contract):
-    from amt.graph.routing import route_after_trainer_propose
-    from amt.schemas.feature_recipe import FeatureTransform, feature_fit_hash
+def test_a_tabular_hypothesis_without_a_shape_is_a_bug_not_a_route(evaluation_contract):
+    """Nothing a human can approve fixes this, so it must not reach the gate."""
+    from amt.graph.routing import route_after_planner_select
 
-    state = _approved_state(evaluation_contract)
-    config = state["current_config"]
-    wider = config.feature_recipe.model_copy(
-        update={
-            "feature_columns": [
-                *config.feature_recipe.feature_columns,
-                FeatureTransform(name="bias", kind="literal", value=1.0),
-            ]
-        }
+    state = base_state(
+        evaluation_contract,
+        current_hypothesis_id="hyp-1",
+        experiment_plan=plan().model_copy(update={"family": "xgboost_classifier"}),
     )
-    state["current_config"] = config.model_copy(
-        update={
-            "feature_recipe": wider,
-            "feature_fit_hash": feature_fit_hash(wider, config.fit_spec),
-        }
-    )
-    assert route_after_trainer_propose(state) == "planner_feature_fit"
+    with pytest.raises(ContractViolation, match="selection node"):
+        route_after_planner_select(state)
 
 
-def test_hc_feature_rejection_redrafts_the_shape():
+def test_hc_feature_rejection_redrafts_every_shape():
     from amt.graph.routing import route_after_hc_feature_fit
 
-    assert route_after_hc_feature_fit({"feature_fit_approved": False}) == "planner_feature_fit"
-    assert route_after_hc_feature_fit({"feature_fit_approved": True}) == "trainer_propose"
+    assert route_after_hc_feature_fit({"shapes_approved": False}) == "planner_feature_fit"
+    assert route_after_hc_feature_fit({"shapes_approved": True}) == "planner_select_hypothesis"
 
 
 def test_a_booster_cannot_train_on_an_unapproved_shape(evaluation_contract):

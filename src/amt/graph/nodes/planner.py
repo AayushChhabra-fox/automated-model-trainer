@@ -7,11 +7,12 @@ from collections.abc import Callable
 from langgraph.types import interrupt
 
 from amt.graph.deps import NodeDeps
-from amt.graph.human import parse_resume
-from amt.graph.routing import ContractViolation, assert_contract_hash, target_family
-from amt.graph.state import CampaignState, Stage, current_hypothesis
+from amt.graph.human import apply_checklist, parse_resume
+from amt.graph.routing import ContractViolation, assert_contract_hash
+from amt.graph.state import CampaignState, Stage
 from amt.schemas.common import ExperimentBudget
-from amt.schemas.feature_recipe import feature_fit_hash, is_tabular_family
+from amt.schemas.feature_recipe import ApprovedShape, is_tabular_family
+from amt.schemas.hypothesis import Hypothesis
 
 
 def make_planner_hypotheses_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
@@ -59,16 +60,22 @@ def make_hc_hypotheses_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
                 "hypotheses": [h.model_dump(mode="json") for h in hypotheses],
                 "prioritization_rationale": state.get("backlog_rationale") or "",
                 "baseline_run_id": state.get("baseline_run_id"),
-                "instructions": "amt approve <campaign> | amt reject <campaign> -m '<feedback>'",
+                "instructions": (
+                    "amt approve <campaign> [--keep H1,H3] [--drop H2] "
+                    "| amt reject <campaign> -m '<feedback>'"
+                ),
             }
         )
         decision = parse_resume(payload)
-        return {
+        update: dict = {
             "hypotheses_approved": decision.approved,
             "human_feedback": decision.feedback,
             "awaiting": None,
             "status": "running",
         }
+        if decision.approved:
+            update["hypotheses"] = apply_checklist(hypotheses, decision)
+        return update
 
     return hc_hypotheses_node
 
@@ -105,12 +112,14 @@ def make_planner_select_hypothesis_node(deps: NodeDeps) -> Callable[[CampaignSta
             return update
 
         chosen = pending[0]
+        shape = _selected_shape(state, chosen)
         plan = deps.planner_agent.build_plan(
             hypothesis=chosen,
             spec=spec,
             contract=contract,
             baseline_reference=state.get("baseline_run_id") or "",
             history=history,
+            shape=shape,
         )
         update["hypotheses"] = [
             h.model_copy(update={"status": "active"}) if h.hypothesis_id == chosen.hypothesis_id
@@ -123,98 +132,209 @@ def make_planner_select_hypothesis_node(deps: NodeDeps) -> Callable[[CampaignSta
         update["trainer_converged"] = False
         update["convergence_reason"] = ""
         update["budget"] = budget.record_hypothesis()
-        # Approval is per hypothesis: a new hypothesis starts with no approved shape.
         update["current_config"] = None
-        update["feature_fit_proposal"] = None
-        update["approved_feature_recipe"] = None
-        update["approved_fit_spec"] = None
-        update["feature_fit_hash"] = ""
-        update["feature_fit_approved"] = False
+        # The shape a human approved at HC_FEATURE, copied into the keys the
+        # Trainer and the executor read. Non-tabular hypotheses clear them, so a
+        # booster's recipe cannot leak into the SASRec run that follows it.
+        update["approved_feature_recipe"] = shape.feature_recipe if shape else None
+        update["approved_fit_spec"] = shape.fit_spec if shape else None
+        update["feature_fit_hash"] = shape.feature_fit_hash if shape else ""
+        update["feature_fit_approved"] = shape is not None
         return update
 
     return planner_select_hypothesis_node
 
 
+def _selected_shape(state: CampaignState, chosen: Hypothesis) -> ApprovedShape | None:
+    """The approved shape for ``chosen``, or ``None`` for a fixed-shape family."""
+    shape = (state.get("approved_shapes") or {}).get(chosen.hypothesis_id)
+    if not is_tabular_family(chosen.family):
+        return None
+    if shape is None:
+        raise ContractViolation(
+            f"hypothesis {chosen.hypothesis_id!r} targets the tabular family "
+            f"{chosen.family!r} but carries no approved feature/fit shape. "
+            "HC_FEATURE approves every tabular shape in the backlog before "
+            "selection, so this is a routing bug, not a missing approval."
+        )
+    return shape
+
+
+def tabular_hypotheses(state: CampaignState) -> list[Hypothesis]:
+    """The pending hypotheses whose family needs a feature/fit shape."""
+    return [
+        h
+        for h in state.get("hypotheses") or []
+        if h.status == "pending" and is_tabular_family(h.family)
+    ]
+
+
 def make_planner_feature_fit_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
-    """Declare the input shape of a tabular model (features, label, candidates, fit)."""
+    """Declare the input shape of every tabular hypothesis in the approved backlog.
+
+    One call per hypothesis, all before the first is planned, so the human sees
+    every shape the campaign will spend compute on in a single sitting. The old
+    per-hypothesis gate charged one review round per hypothesis and re-opened on
+    Trainer drift; eight of those rounds is what this replaces.
+    """
 
     def planner_feature_fit_node(state: CampaignState) -> dict:
         contract = state.get("evaluation_contract")
         assert_contract_hash(state, contract)
-        plan = state.get("experiment_plan")
-        hypothesis = current_hypothesis(state)
-        if plan is None or hypothesis is None:
-            raise ContractViolation("A feature/fit proposal needs a hypothesis and a plan.")
-        family = target_family(state)
-        if not is_tabular_family(family):
+        pending = tabular_hypotheses(state)
+        if not pending:
             raise ContractViolation(
-                f"family {family!r} does not take a FeatureRecipe; "
-                "only the tabular booster families do."
+                "No pending tabular hypothesis to propose a shape for; "
+                "route_after_hc_hypotheses should have skipped HC_FEATURE."
             )
-        proposal = deps.planner_agent.propose_feature_fit(
-            hypothesis=hypothesis,
-            plan=plan,
-            spec=state.get("problem_spec"),
-            contract=contract,
-            family=family,
-            previous=state.get("feature_fit_proposal"),
-            human_feedback=state.get("human_feedback"),
-        )
+        previous = dict(state.get("feature_fit_proposals") or {})
+        spec = state.get("problem_spec")
+        feedback = state.get("human_feedback")
+
+        proposals = {}
+        for hypothesis in pending:
+            proposal = deps.planner_agent.propose_feature_fit(
+                hypothesis=hypothesis,
+                spec=spec,
+                contract=contract,
+                family=hypothesis.family,
+                previous=previous.get(hypothesis.hypothesis_id),
+                human_feedback=feedback,
+            )
+            _reject_unreachable_sources(deps, proposal)
+            proposals[hypothesis.hypothesis_id] = proposal
         return {
             "stage": Stage.FEATURE_FIT.value,
             "status": "running",
-            "feature_fit_proposal": proposal,
-            "feature_fit_approved": False,
+            "feature_fit_proposals": proposals,
+            "shapes_approved": False,
             "human_feedback": None,
         }
 
     return planner_feature_fit_node
 
 
+def _reject_unreachable_sources(deps: NodeDeps, proposal) -> None:
+    """Fail a recipe naming a table that does not exist, here and not on a cluster.
+
+    A bad table name otherwise survives approval, a wheel build and a job
+    submission before Spark reports it. Skipped under ``--mock``, which has no
+    warehouse to ask.
+    """
+    probe = getattr(deps, "sql_probe", None)
+    if probe is None:
+        return
+    for source in proposal.feature_recipe.sources:
+        if not source.table:
+            continue
+        try:
+            probe.describe_table(source.table)
+        except Exception as exc:
+            raise ContractViolation(
+                f"recipe source {source.name!r} names {source.table!r}, which this "
+                f"identity cannot describe: {exc}"
+            ) from exc
+
+
 def make_hc_feature_fit_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
-    """HC_FEATURE — a human approves what the model is allowed to see, once per shape."""
+    """HC_FEATURE — one review of every shape the campaign will train.
+
+    Dropping a shape here abandons its hypothesis, which is the decision the
+    previous operator had to smuggle through ``FeatureRecipe.notes``.
+    """
 
     def hc_feature_fit_node(state: CampaignState) -> dict:
-        proposal = state.get("feature_fit_proposal")
+        contract = state.get("evaluation_contract")
+        proposals = dict(state.get("feature_fit_proposals") or {})
+        hypotheses = list(state.get("hypotheses") or [])
+        titles = {h.hypothesis_id: h.title for h in hypotheses}
         payload = interrupt(
             {
                 "checkpoint": "HC_FEATURE",
-                "title": "Feature/fit approval",
+                "title": f"Feature/fit approval — {len(proposals)} shape(s)",
                 "campaign_id": state.get("campaign_id"),
-                "hypothesis_id": state.get("current_hypothesis_id"),
-                "feature_fit": proposal.model_dump(mode="json") if proposal else None,
-                "feature_fit_hash": proposal.feature_fit_hash if proposal else None,
-                "instructions": "amt approve <campaign> | amt reject <campaign> -m '<feedback>'",
+                "hypothesis_ids": sorted(proposals),
+                "shapes": {
+                    hypothesis_id: {
+                        "title": titles.get(hypothesis_id, ""),
+                        "feature_fit_hash": proposal.feature_fit_hash,
+                        **_ordered_shape(proposal),
+                    }
+                    for hypothesis_id, proposal in sorted(proposals.items())
+                },
+                "duplicate_shapes": _duplicate_shapes(proposals),
+                "validation_rows": getattr(contract.validation_split, "row_count", 0)
+                if contract
+                else 0,
+                "instructions": (
+                    "amt approve <campaign> [--keep H1,H3] [--drop H2] "
+                    "| amt reject <campaign> -m '<feedback>'"
+                ),
             }
         )
         decision = parse_resume(payload)
         update: dict = {
-            "feature_fit_approved": decision.approved,
+            "shapes_approved": decision.approved,
             "human_feedback": decision.feedback,
             "awaiting": None,
             "status": "running",
         }
-        if not decision.approved or proposal is None:
+        if not decision.approved:
             return update
 
-        recipe, fit = proposal.feature_recipe, proposal.fit_spec
-        approved_hash = feature_fit_hash(recipe, fit)
-        update["approved_feature_recipe"] = recipe
-        update["approved_fit_spec"] = fit
-        update["feature_fit_hash"] = approved_hash
-        plan = state.get("experiment_plan")
-        if plan is not None:
-            update["experiment_plan"] = plan.model_copy(
-                update={
-                    "family": proposal.family,
-                    "feature_recipe": recipe,
-                    "fit_spec": fit,
-                    "feature_fit_hash": approved_hash,
-                }
+        kept = apply_checklist(hypotheses, decision, scope=proposals)
+        update["hypotheses"] = kept
+        alive = {h.hypothesis_id for h in kept if h.status == "pending"}
+        update["approved_shapes"] = {
+            hypothesis_id: ApprovedShape(
+                hypothesis_id=hypothesis_id,
+                family=proposal.family,
+                feature_recipe=proposal.feature_recipe,
+                fit_spec=proposal.fit_spec,
+                approved_at_hash=state.get("contract_hash") or "",
             )
+            for hypothesis_id, proposal in proposals.items()
+            if hypothesis_id in alive
+        }
         return update
 
     return hc_feature_fit_node
+
+
+#: `candidate_generation` and `fit_spec` decide the cost and the objective of a
+#: run, and were below the fold of an 8 000-character preview. They lead now.
+_SHAPE_KEY_ORDER = ("candidate_generation", "fit_spec", "label", "feature_columns")
+
+
+def _ordered_shape(proposal) -> dict:
+    """The proposal as JSON, with the fields a reviewer decides on first."""
+    document = proposal.model_dump(mode="json")
+    recipe = document.get("feature_recipe") or {}
+    lead = {key: recipe[key] for key in _SHAPE_KEY_ORDER if key in recipe}
+    lead |= {key: value for key, value in recipe.items() if key not in lead}
+    document["feature_recipe"] = lead
+    return {
+        "fit_spec": document.pop("fit_spec", None),
+        "candidate_generation": lead.get("candidate_generation"),
+        **document,
+    }
+
+
+def _duplicate_shapes(proposals: dict) -> dict[str, list[str]]:
+    """Hypotheses that reduce to the same shape, so a reviewer can strike one.
+
+    Two hypotheses with one ``feature_fit_hash`` are one experiment billed
+    twice; the backlog reads as five ideas and spends like three.
+    """
+    by_hash: dict[str, list[str]] = {}
+    for hypothesis_id, proposal in sorted(proposals.items()):
+        by_hash.setdefault(proposal.feature_fit_hash, []).append(hypothesis_id)
+    return {
+        hypothesis_id: [other for other in ids if other != hypothesis_id]
+        for ids in by_hash.values()
+        if len(ids) > 1
+        for hypothesis_id in ids
+    }
 
 
 def make_planner_final_champion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:

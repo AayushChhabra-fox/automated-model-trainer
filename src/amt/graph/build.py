@@ -49,7 +49,6 @@ from amt.graph.routing import (
     route_after_planner_select,
     route_after_qa_phase0,
     route_after_trainer_interpret,
-    route_after_trainer_propose,
 )
 from amt.graph.state import CampaignState
 from amt.settings import Settings, get_settings
@@ -177,6 +176,19 @@ def build_graph(
         route_after_hc_hypotheses,
         {
             "planner_hypotheses": "planner_hypotheses",
+            "planner_feature_fit": "planner_feature_fit",
+            "planner_select_hypothesis": "planner_select_hypothesis",
+        },
+    )
+    # Every tabular shape is reviewed once, here, before the first hypothesis is
+    # planned. There is deliberately no edge from `trainer_propose` back into
+    # this pair: the Trainer's structural asks are clamped, not re-approved.
+    graph.add_edge("planner_feature_fit", "hc_feature_fit")
+    graph.add_conditional_edges(
+        "hc_feature_fit",
+        route_after_hc_feature_fit,
+        {
+            "planner_feature_fit": "planner_feature_fit",
             "planner_select_hypothesis": "planner_select_hypothesis",
         },
     )
@@ -185,27 +197,10 @@ def build_graph(
         route_after_planner_select,
         {
             "trainer_propose": "trainer_propose",
-            "planner_feature_fit": "planner_feature_fit",
             "planner_final_champion": "planner_final_champion",
         },
     )
-    graph.add_edge("planner_feature_fit", "hc_feature_fit")
-    graph.add_conditional_edges(
-        "hc_feature_fit",
-        route_after_hc_feature_fit,
-        {
-            "planner_feature_fit": "planner_feature_fit",
-            "trainer_propose": "trainer_propose",
-        },
-    )
-    graph.add_conditional_edges(
-        "trainer_propose",
-        route_after_trainer_propose,
-        {
-            "execute_training": "execute_training",
-            "planner_feature_fit": "planner_feature_fit",
-        },
-    )
+    graph.add_edge("trainer_propose", "execute_training")
     graph.add_edge("execute_training", "trainer_interpret")
     graph.add_conditional_edges(
         "trainer_interpret",
