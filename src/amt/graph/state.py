@@ -122,6 +122,9 @@ class CampaignState(TypedDict, total=False):
     # Human interaction
     human_feedback: str | None
     awaiting: str | None
+    # Every HC_* resume with approved=False. The previous campaign burned eight
+    # of these and `status` never moved, because a rejection costs no compute.
+    gate_cycles: int
     errors: list[str]
 
 
@@ -184,6 +187,7 @@ def new_campaign_state(
         promotion_decision=None,
         human_feedback=None,
         awaiting=None,
+        gate_cycles=0,
         errors=[],
     )
 
@@ -202,15 +206,25 @@ def describe(state: CampaignState) -> dict[str, Any]:
     feature_fit = (state.get("feature_fit_hash") or "")[:12] or "n/a"
     if state.get("feature_fit_approved"):
         feature_fit = f"{feature_fit} (approved)"
-    backlog = len(state.get("hypotheses") or [])
-    hypotheses = f"{backlog} (approved)" if state.get("hypotheses_approved") else str(backlog)
-    return {
+    hypotheses = state.get("hypotheses") or []
+    by_status: dict[str, int] = {}
+    for hypothesis in hypotheses:
+        by_status[hypothesis.status] = by_status.get(hypothesis.status, 0) + 1
+    backlog = f"{len(hypotheses)}"
+    if by_status:
+        backlog += " (" + ", ".join(f"{n} {s}" for s, n in sorted(by_status.items())) + ")"
+    if state.get("hypotheses_approved"):
+        backlog += " approved"
+
+    cycles = int(state.get("gate_cycles", 0) or 0)
+    clamped = list(state.get("structural_asks_clamped") or [])
+    described = {
         "campaign_id": state.get("campaign_id"),
         "stage": state.get("stage"),
         "status": state.get("status"),
         "awaiting": state.get("awaiting"),
         "contract_hash": (state.get("contract_hash") or "")[:12],
-        "hypotheses": hypotheses,
+        "hypotheses": backlog,
         "current_hypothesis": state.get("current_hypothesis_id"),
         "feature_fit": feature_fit,
         "iteration": state.get("iteration", 0),
@@ -219,4 +233,12 @@ def describe(state: CampaignState) -> dict[str, Any]:
         "champions": len(state.get("hypothesis_champions") or []),
         "frozen": state.get("frozen_champion") is not None,
         "qa_decision": state.get("qa_decision").value if state.get("qa_decision") else None,
+        # Rejections cost no compute, so without this line a campaign that has
+        # spent a day arguing with its own planner looks the same as a fresh one.
+        "gate_cycles": f"{cycles} (high)" if cycles > 2 else str(cycles),
     }
+    if clamped:
+        described["trainer_asks_refused"] = (
+            f"{len(clamped)} — trainer requested a structural change; kept the approved shape"
+        )
+    return described

@@ -45,12 +45,25 @@ def pin_auth_env(settings: Settings | None = None) -> str:
     The SDK refuses to start when the environment describes two identities at
     once, and AMT is not the only thing that builds a client from it: MLflow's
     artifact repository constructs its own ``WorkspaceClient()``, which reads
-    the ambient environment and knows nothing of the precedence below.  Writing
-    the choice into ``DATABRICKS_AUTH_TYPE`` is what reaches those clients.
+    the ambient environment and knows nothing of the precedence below.
+
+    The credential itself has to be written out too, not just the auth type.
+    ``.env`` is read by pydantic-settings into :class:`Settings`, which MLflow
+    cannot see; with only ``DATABRICKS_AUTH_TYPE`` set, MLflow's client falls
+    through to ``~/.databrickscfg``, and a ``[DEFAULT]`` profile holding a
+    username and password there answers every call with
+    ``403 should_change_password``.
     """
     settings = settings or get_settings()
     auth_type = "pat" if settings.databricks_token else "oauth-m2m"
     os.environ["DATABRICKS_AUTH_TYPE"] = auth_type
+    if settings.databricks_host:
+        os.environ["DATABRICKS_HOST"] = settings.databricks_host
+    if auth_type == "pat":
+        os.environ["DATABRICKS_TOKEN"] = str(settings.databricks_token)
+    else:
+        os.environ["DATABRICKS_CLIENT_ID"] = str(settings.databricks_client_id or "")
+        os.environ["DATABRICKS_CLIENT_SECRET"] = str(settings.databricks_client_secret or "")
     return auth_type
 
 

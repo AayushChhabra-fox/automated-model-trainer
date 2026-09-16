@@ -31,6 +31,7 @@ def _executor(tracking_uri: str = "databricks") -> DatabricksExecutor:
     settings = SimpleNamespace(
         mlflow_tracking_uri=tracking_uri,
         mlflow_experiment_id=EXPERIMENT_ID,
+        databricks_host="https://example.cloud.databricks.com",
         databricks_token="dapi-xxx",
     )
     return DatabricksExecutor(settings=settings, client=object())
@@ -88,6 +89,7 @@ def _settings(experiment_id: str = "") -> SimpleNamespace:
         mlflow_experiment_id=experiment_id,
         mlflow_experiment_root="/Users/me/amt-exp",
         experiment_name=lambda campaign: f"/Users/me/amt-exp/{campaign}",
+        databricks_host="https://example.cloud.databricks.com",
         databricks_token="dapi-xxx",
     )
 

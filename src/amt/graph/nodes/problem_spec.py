@@ -7,7 +7,7 @@ from collections.abc import Callable
 from langgraph.types import interrupt
 
 from amt.graph.deps import NodeDeps
-from amt.graph.human import parse_resume
+from amt.graph.human import gate_update, parse_resume
 from amt.graph.state import CampaignState, Stage
 
 
@@ -56,9 +56,7 @@ def make_hc_problem_spec_node(deps: NodeDeps) -> Callable[[CampaignState], dict]
         decision = parse_resume(payload)
         return {
             "problem_spec_approved": decision.approved,
-            "human_feedback": decision.feedback,
-            "awaiting": None,
-            "status": "running",
+            **gate_update(state, decision),
         }
 
     return hc_problem_spec_node

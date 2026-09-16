@@ -95,9 +95,15 @@ def build_task(
             # existing all-purpose cluster is billed to that cluster and cannot
             # be attributed here at all.
             spec["custom_tags"] = {str(k): str(v) for k, v in custom_tags.items()}
-        for optional in ("policy_id", "data_security_mode", "instance_pool_id"):
+        for optional in ("policy_id", "instance_pool_id", "single_user_name"):
             if cluster.get(optional):
                 spec[optional] = cluster[optional]
+        if cluster.get("data_security_mode"):
+            # Settings carry the name so `.env` and `amt config` stay readable;
+            # the SDK serialises only its own enum.
+            spec["data_security_mode"] = compute.DataSecurityMode(
+                str(cluster["data_security_mode"])
+            )
         kwargs["new_cluster"] = compute.ClusterSpec(**spec)
 
     return jobs.SubmitTask(**kwargs)

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from langgraph.types import interrupt
 
 from amt.graph.deps import NodeDeps
-from amt.graph.human import apply_checklist, parse_resume
+from amt.graph.human import apply_checklist, gate_update, parse_resume
 from amt.graph.routing import ContractViolation, assert_contract_hash
 from amt.graph.state import CampaignState, Stage
 from amt.schemas.common import ExperimentBudget
@@ -100,9 +100,7 @@ def make_hc_hypotheses_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         decision = parse_resume(payload)
         update: dict = {
             "hypotheses_approved": decision.approved,
-            "human_feedback": decision.feedback,
-            "awaiting": None,
-            "status": "running",
+            **gate_update(state, decision),
         }
         if decision.approved:
             update["hypotheses"] = apply_checklist(hypotheses, decision)
@@ -308,9 +306,7 @@ def make_hc_feature_fit_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         decision = parse_resume(payload)
         update: dict = {
             "shapes_approved": decision.approved,
-            "human_feedback": decision.feedback,
-            "awaiting": None,
-            "status": "running",
+            **gate_update(state, decision),
         }
         if not decision.approved:
             return update

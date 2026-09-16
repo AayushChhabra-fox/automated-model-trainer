@@ -11,15 +11,41 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from amt import monitor
 from amt.graph.build import build_graph, sqlite_checkpointer
 from amt.graph.state import describe, new_campaign_state
 from amt.schemas.common import ExperimentBudget
 from amt.schemas.qa import QADecision
 from amt.settings import get_settings
 
+HELP = """Autonomous ML experimentation on Databricks.
+
+A campaign drafts a ProblemSpec from the data, freezes an EvaluationContract,
+trains a baseline, then loops a Trainer inside one hypothesis at a time. Five
+decisions are yours: HC2 the spec, HC3 the contract, HC_BACKLOG the hypotheses,
+HC_FEATURE every tabular shape at once, HC4 the conclusion.
+
+Driving one, in order:
+
+\b
+  doctor                    can this machine run a campaign at all
+  start "<problem>" -c <id> begin, and stop at HC2
+  status <id>               where it is and what it is waiting on
+  show <id>                 the pending checkpoint's document in full
+  approve <id>              answer it; --keep/--drop edit a checklist
+  reject <id> -m "<why>"    send it back with feedback
+  report <id>               the scientific conclusion
+  promote <id>              HC4, and register the model when QA passed
+
+\b
+`run <id>` is all of that in one interactive session. `config` prints the
+resolved settings and where each value came from. `list` names every local
+campaign. Long form: docs/RUNBOOK.md.
+"""
+
 app = typer.Typer(
     name="amt",
-    help="Automated Model Trainer & QA Agent — autonomous ML experimentation on Databricks.",
+    help=HELP,
     no_args_is_help=True,
     add_completion=False,
 )
@@ -58,24 +84,11 @@ def _build(mock: bool, campaign_id: str, max_iterations: int | None = None) -> A
     )
 
 
-def _config(campaign: str) -> dict:
-    return {"configurable": {"thread_id": campaign}, "recursion_limit": 100}
-
-
-def _pending_interrupt(graph: Any, campaign: str) -> dict | None:
-    """Return the payload of the interrupt the campaign is currently suspended on."""
-    snapshot = graph.get_state(_config(campaign))
-    for task in getattr(snapshot, "tasks", ()) or ():
-        for interrupt in getattr(task, "interrupts", ()) or ():
-            value = getattr(interrupt, "value", None)
-            if isinstance(value, dict):
-                return value
-    return None
-
-
-def _state(graph: Any, campaign: str) -> dict:
-    snapshot = graph.get_state(_config(campaign))
-    return dict(snapshot.values or {})
+#: The read model lives in `amt.monitor` so the web surface reads a campaign
+#: the same way this does. These are the names the CLI uses.
+_config = monitor.config_for
+_pending_interrupt = monitor.pending_interrupt
+_state = monitor.state
 
 
 def _run(graph: Any, payload: Any, campaign: str) -> None:
@@ -137,98 +150,26 @@ def _report_position(graph: Any, campaign: str) -> None:
     console.print(f"[green]campaign {campaign}[/green] status={status} qa_decision={decision}")
 
 
-#: A checkpoint document can run to hundreds of KB once probe rows are included, which
-#: no terminal panel can usefully show. The panel is a preview; `amt show` is the review.
-#: 8 000 cut off the fit spec and the candidate budget on a real backlog.
-PREVIEW_CHARS = 20_000
-
-
-def _clip(text: str) -> tuple[str, bool]:
-    """``(text, was_truncated)`` for the checkpoint preview."""
-    if len(text) <= PREVIEW_CHARS:
-        return text, False
-    return text[:PREVIEW_CHARS], True
-
-
-def checkpoint_document(payload: dict) -> Any:
-    """The part of an interrupt payload a human actually decides on."""
-    for key in (
-        "problem_spec",
-        "evaluation_contract",
-        "hypotheses",
-        "shapes",
-        "conclusion",
-    ):
-        if payload.get(key):
-            return payload[key]
-    return payload
+PREVIEW_CHARS = monitor.PREVIEW_CHARS
+FIT_FIELDS = monitor.FIT_FIELDS
+checkpoint_document = monitor.checkpoint_document
+backlog_rows = monitor.backlog_rows
+shape_rows = monitor.shape_rows
 
 
 def _render_checkpoint(payload: dict) -> tuple[str, bool]:
-    return _clip(json.dumps(checkpoint_document(payload), indent=2, default=str))
+    return monitor.clip(json.dumps(checkpoint_document(payload), indent=2, default=str))
 
 
-#: The six FitSpec fields a reviewer has to see. Not the booster params: those
-#: are the Trainer's to change without asking.
-FIT_FIELDS = (
-    "objective",
-    "eval_metric",
-    "num_boost_round",
-    "early_stopping_rounds",
-    "negative_samples_per_positive",
-    "seed",
-)
+#: Columns worth a terminal column at each checkpoint. `title` is prose and
+#: belongs in the JSON below the table, not squeezed into a cell.
+_HIDDEN_COLUMNS = {"HC_BACKLOG": ("title", "note")}
 
-
-def backlog_rows(payload: dict) -> list[dict[str, str]]:
-    """One row per hypothesis: what it targets, what it costs, whether it is alive."""
-    return [
-        {
-            "id": str(h.get("hypothesis_id") or ""),
-            "title": str(h.get("title") or ""),
-            "family": str(h.get("family") or "—"),
-            "metric": str(h.get("metric_expected_to_improve") or ""),
-            "expected effect": str(h.get("expected_effect_size") or ""),
-            "cost": f"{h.get('estimated_cost_minutes') or 0:.0f}m",
-            "status": str(h.get("status") or ""),
-        }
-        for h in payload.get("hypotheses") or []
-    ]
-
-
-def shape_rows(payload: dict) -> list[dict[str, str]]:
-    """One row per feature/fit shape, priced.
-
-    The candidate-row estimate is the number this gate exists to catch: a
-    plausible-looking ``n`` against a 44 000-row validation split is 8.9M rows
-    of feature building, and nothing else in the payload says so.
-    """
-    validation_rows = int(payload.get("validation_rows") or 0)
-    duplicates = payload.get("duplicate_shapes") or {}
-    rows = []
-    for hypothesis_id, shape in sorted((payload.get("shapes") or {}).items()):
-        candidates = shape.get("candidate_generation") or {}
-        fit = shape.get("fit_spec") or {}
-        n = int(candidates.get("n") or 0)
-        estimated = validation_rows * n
-        notes = []
-        if duplicates.get(hypothesis_id):
-            notes.append(f"same shape as {', '.join(duplicates[hypothesis_id])}")
-        if not (shape.get("feature_recipe") or {}).get("feature_columns"):
-            notes.append("no feature columns")
-        rows.append(
-            {
-                "id": hypothesis_id,
-                "family": str(shape.get("family") or ""),
-                "candidates": f"{candidates.get('strategy') or '?'} n={n}",
-                "est. rows": f"{estimated:,}" if estimated else "unknown",
-                "fit": "\n".join(
-                    f"{key}={fit.get(key)}" for key in FIT_FIELDS if fit.get(key) not in ("", None)
-                ),
-                "notes": "\n".join(notes),
-            }
-        )
-    return rows
+_SUMMARY_TITLES = {
+    "HC_BACKLOG": "hypothesis backlog",
+    "HC_FEATURE": "feature/fit shapes",
+    "HC_CHAMPION": "hypothesis champion vs baseline",
+}
 
 
 def summarize(payload: dict) -> Any:
@@ -238,13 +179,15 @@ def summarize(payload: dict) -> Any:
     whether to read it. ``None`` when a checkpoint has nothing worth
     summarizing separately.
     """
+    rows = monitor.summary_rows(payload)
+    if not rows:
+        return None
     checkpoint = str(payload.get("checkpoint") or "")
-    if checkpoint == "HC_BACKLOG":
-        rows = backlog_rows(payload)
-        return _table("hypothesis backlog", rows, drop=("title",))
-    if checkpoint == "HC_FEATURE":
-        return _table("feature/fit shapes", shape_rows(payload))
-    return None
+    return _table(
+        _SUMMARY_TITLES.get(checkpoint, checkpoint),
+        rows,
+        drop=_HIDDEN_COLUMNS.get(checkpoint, ()),
+    )
 
 
 def _table(title: str, rows: list[dict[str, str]], drop: tuple[str, ...] = ()) -> Table:
@@ -271,7 +214,7 @@ def start(
     max_hypotheses: int = typer.Option(2, help="Hypotheses allowed in the campaign."),
     max_compute_minutes: float = typer.Option(240.0, help="Compute budget for the campaign."),
 ) -> None:
-    """Start a campaign and run to the first human checkpoint (HC2)."""
+    """Begin a campaign and run to HC2, the ProblemSpec approval."""
     graph = _build(mock, campaign)
     if _state(graph, campaign):
         console.print(f"[red]Campaign {campaign!r} already exists.[/red] Use `amt status`.")
@@ -313,7 +256,11 @@ def reject(
     message: str = typer.Option(..., "--message", "-m", help="Feedback for the agent."),
     mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
 ) -> None:
-    """Reject the current checkpoint with feedback; the stage is re-run."""
+    """Send the pending checkpoint back with feedback; its stage is re-run.
+
+    Costs a round trip through the agent, which is why HC_BACKLOG and
+    HC_FEATURE take `--keep` / `--drop` instead for a per-item objection.
+    """
     _resume(campaign, {"approved": False, "feedback": message}, mock)
 
 
@@ -336,25 +283,250 @@ def resume(
 
 
 @app.command()
+def run(
+    campaign: str = typer.Argument(..., help="Campaign id."),
+    mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
+) -> None:
+    """Drive a campaign to its end from one terminal, answering checkpoints inline.
+
+    The same stream, checkpoints and resumes the other verbs use, in a loop:
+    `approve` / `reject <why>` / `keep H1,H3` / `drop H2` / `show` / `status` /
+    `quit`. Quitting loses nothing — the campaign is in the checkpointer.
+    """
+    from langgraph.types import Command
+
+    graph = _build(mock, campaign)
+    if not _state(graph, campaign):
+        console.print(f"[red]No campaign named {campaign!r}.[/red] Run `amt start` first.")
+        raise typer.Exit(code=1)
+
+    # `None` continues from the checkpoint: a campaign already sitting at an
+    # interrupt just re-enters that node and suspends again, which is cheap
+    # because every interrupting node does nothing but build its payload.
+    payload: Any = None
+    while True:
+        _run(graph, payload, campaign)
+        payload = None
+        pending = _pending_interrupt(graph, campaign)
+        _report_position(graph, campaign)
+        if pending is None:
+            return
+        decision = _prompt_decision(graph, campaign, pending)
+        if decision is None:
+            console.print("[dim]left at the checkpoint; `amt run` picks it up here.[/dim]")
+            return
+        payload = Command(resume=decision)
+
+
+def _prompt_decision(graph: Any, campaign: str, pending: dict) -> dict | None:
+    """Ask the operator what to do about ``pending``. ``None`` means stop here."""
+    while True:
+        answer = typer.prompt(
+            f"{pending.get('checkpoint')} > approve | reject <why> | keep <ids> | "
+            "drop <ids> | show | status | quit",
+            default="show",
+            show_default=False,
+        ).strip()
+        verb, _, rest = answer.partition(" ")
+        verb, rest = verb.lower(), rest.strip()
+        if verb in {"quit", "q", "exit"}:
+            return None
+        if verb in {"approve", "a", "y"}:
+            return {"approved": True}
+        if verb in {"reject", "r", "n"}:
+            if not rest:
+                console.print("[red]reject needs a reason[/red] — the agent redrafts from it.")
+                continue
+            return {"approved": False, "feedback": rest}
+        if verb == "keep":
+            return {"approved": True, "keep": rest}
+        if verb == "drop":
+            return {"approved": True, "drop": rest}
+        if verb == "show":
+            print(json.dumps(checkpoint_document(pending), indent=2, default=str))
+            continue
+        if verb == "status":
+            console.print(_status_table(campaign, _state(graph, campaign)))
+            continue
+        console.print(f"[red]unknown verb {verb!r}[/red]")
+
+
+def _status_table(campaign: str, state: dict) -> Table:
+    table = Table(title=f"campaign {campaign}", show_header=False)
+    for key, value in describe(state).items():
+        text = str(value)
+        if "(high)" in text or key == "trainer_asks_refused":
+            text = f"[yellow]{text}[/yellow]"
+        table.add_row(str(key), text)
+    return table
+
+
+@app.command()
 def status(
     campaign: str = typer.Argument(..., help="Campaign id."),
     mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
 ) -> None:
-    """Show the compact campaign state."""
+    """Where the campaign is, what it is waiting on, and what it has spent."""
     graph = _build(mock, campaign)
     state = _state(graph, campaign)
     if not state:
         console.print(f"[red]No campaign named {campaign!r}.[/red]")
         raise typer.Exit(code=1)
-    table = Table(title=f"campaign {campaign}", show_header=False)
-    for key, value in describe(state).items():
-        table.add_row(str(key), str(value))
-    console.print(table)
+    console.print(_status_table(campaign, state))
     payload = _pending_interrupt(graph, campaign)
     if payload:
         console.print(
             f"[yellow]awaiting {payload.get('checkpoint')}[/yellow]: {payload.get('title')}"
         )
+
+
+@app.command(name="list")
+def list_campaigns() -> None:
+    """Every campaign in the local checkpoint database, most recent first."""
+    settings = get_settings()
+    campaigns = monitor.list_campaigns(settings.resolved_checkpoint_db())
+    if not campaigns:
+        console.print(f"[yellow]no campaigns in {settings.resolved_checkpoint_db()}[/yellow]")
+        return
+    for campaign in campaigns:
+        console.print(campaign)
+
+
+@app.command()
+def config() -> None:
+    """Print the resolved settings, masked, with where each value came from.
+
+    The trap this exists for: an `AMT_*` variable exported in the shell
+    silently shadows `.env`, and the campaign then writes to a catalog nobody
+    chose. `source` is what tells you.
+    """
+    table = Table(title="resolved settings", header_style="bold")
+    for column in ("setting", "value", "source"):
+        table.add_column(column, overflow="fold")
+    for row in monitor.masked_settings(get_settings()):
+        table.add_row(row["setting"], row["value"], row["source"])
+    console.print(table)
+
+
+@app.command()
+def doctor(
+    tables: str = typer.Option(
+        "", "--tables", help="Comma-separated tables the campaign must be able to read."
+    ),
+    llm: bool = typer.Option(True, "--llm/--no-llm", help="Spend one structured-output call."),
+) -> None:
+    """Check everything a campaign needs before it spends a cluster minute.
+
+    Auth, the warehouse, the artifact volume, the compute spec, MLflow and one
+    real structured-output round-trip. Every failure here used to surface as a
+    job that died twenty minutes in.
+    """
+    settings = get_settings()
+    checks: list[tuple[str, bool, str]] = []
+
+    def check(name: str, fn: Any) -> Any:
+        try:
+            detail = fn()
+            checks.append((name, True, str(detail or "")))
+            return detail
+        except Exception as exc:
+            checks.append((name, False, f"{type(exc).__name__}: {exc}"))
+            return None
+
+    def _auth() -> str:
+        from amt.databricks.client import get_workspace_client
+
+        user = get_workspace_client(settings).current_user.me()
+        return str(getattr(user, "user_name", "") or getattr(user, "id", ""))
+
+    def _warehouse() -> str:
+        from amt.databricks.sql import ReadOnlySQL
+
+        probe = ReadOnlySQL(settings=settings)
+        if int(probe.scalar("SELECT 1") or 0) != 1:
+            raise RuntimeError("warehouse did not return 1")
+        return f"warehouse {settings.warehouse_id}"
+
+    def _volume() -> str:
+        from amt.databricks.client import get_workspace_client
+        from amt.databricks.wheel import upload_bytes
+
+        path = f"{settings.artifact_volume.rstrip('/')}/.amt-doctor"
+        upload_bytes(get_workspace_client(settings), path, b"ok")
+        return path
+
+    def _compute() -> str:
+        from amt.databricks.client import get_workspace_client
+
+        spec = settings.cluster_spec()
+        if spec.get("existing_cluster_id"):
+            raise RuntimeError(
+                f"AMT_EXISTING_CLUSTER_ID={spec['existing_cluster_id']} is set: those runs "
+                "carry no job tags, so their compute is unattributable in "
+                "system.billing.usage, and they bill as All-Purpose rather than Jobs Compute"
+            )
+        # A node type from the wrong cloud passes every local check and fails at
+        # cluster launch, twenty minutes into the first campaign.
+        node_type = str(spec.get("node_type_id") or "")
+        offered = get_workspace_client(settings).clusters.list_node_types()
+        available = {str(n.node_type_id) for n in (getattr(offered, "node_types", None) or [])}
+        if node_type not in available:
+            raise RuntimeError(
+                f"AMT_NODE_TYPE_ID={node_type!r} does not exist in this workspace "
+                f"({len(available)} types offered); it is probably from another cloud"
+            )
+        return f"job cluster {node_type} x{spec.get('num_workers')}, {settings.spark_version}"
+
+    def _mlflow() -> str:
+        from amt.databricks.mlflow_client import set_tracking_uri
+
+        set_tracking_uri(settings)
+        if settings.mlflow_experiment_id:
+            import mlflow
+
+            return str(mlflow.get_experiment(settings.mlflow_experiment_id).name)
+        return f"root {settings.mlflow_experiment_root}"
+
+    def _reads() -> str:
+        from amt.databricks.sql import ReadOnlySQL
+
+        probe = ReadOnlySQL(settings=settings)
+        wanted = [t.strip() for t in tables.split(",") if t.strip()]
+        for table in wanted:
+            probe.describe_table(table)
+        return f"{len(wanted)} table(s) readable" if wanted else "none requested"
+
+    def _llm() -> str:
+        from amt.agents.base import StructuredAgent
+        from amt.schemas.qa import Phase0Triage
+
+        agent = StructuredAgent(
+            name="doctor",
+            prompt="Return a Phase0Triage saying a missing preprocessing artifact is fixable.",
+            output_model=Phase0Triage,
+            model=settings.planner_model,
+            settings=settings,
+        )
+        return f"{settings.planner_model} -> fixable={agent.invoke('ping').fixable}"
+
+    check("auth", _auth)
+    check("sql warehouse", _warehouse)
+    check("artifact volume writable", _volume)
+    check("compute spec", _compute)
+    check("mlflow", _mlflow)
+    if tables:
+        check("source tables readable", _reads)
+    if llm:
+        check("llm structured output", _llm)
+
+    table = Table(title="amt doctor", header_style="bold")
+    for column in ("check", "", "detail"):
+        table.add_column(column, overflow="fold")
+    for name, ok, detail in checks:
+        table.add_row(name, "[green]ok[/green]" if ok else "[red]FAIL[/red]", detail)
+    console.print(table)
+    if any(not ok for _name, ok, _detail in checks):
+        raise typer.Exit(code=1)
 
 
 @app.command()

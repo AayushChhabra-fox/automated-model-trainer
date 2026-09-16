@@ -7,7 +7,7 @@ from collections.abc import Callable
 from langgraph.types import interrupt
 
 from amt.graph.deps import NodeDeps
-from amt.graph.human import parse_resume
+from amt.graph.human import gate_update, parse_resume
 from amt.graph.routing import ContractViolation, assert_contract_hash
 from amt.graph.state import CampaignState, Stage
 
@@ -77,9 +77,7 @@ def make_hc_contract_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         decision = parse_resume(payload)
         update: dict = {
             "contract_approved": decision.approved,
-            "human_feedback": decision.feedback,
-            "awaiting": None,
-            "status": "running",
+            **gate_update(state, decision),
         }
         if decision.approved and contract is not None:
             # Ground truth is frozen here; every later node and job asserts this hash.

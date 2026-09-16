@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from pydantic import Field
@@ -65,6 +65,21 @@ def parse_resume(payload: Any) -> HumanDecision:
             drop=_ids(payload.get("drop")),
         )
     raise TypeError(f"Unsupported resume payload: {type(payload).__name__}")
+
+
+def gate_update(state: Mapping[str, Any], decision: HumanDecision) -> dict:
+    """The fields every human checkpoint returns, including the bounce counter.
+
+    ``gate_cycles`` is the count the previous campaign had no way to see: eight
+    reject/approve rounds cost no compute, so nothing in `status` moved and the
+    loop looked idle rather than expensive.
+    """
+    return {
+        "human_feedback": decision.feedback,
+        "awaiting": None,
+        "status": "running",
+        "gate_cycles": int(state.get("gate_cycles", 0) or 0) + (0 if decision.approved else 1),
+    }
 
 
 class UnknownHypothesis(ValueError):

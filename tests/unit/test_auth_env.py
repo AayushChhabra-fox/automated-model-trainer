@@ -10,13 +10,17 @@ import pytest
 from amt.databricks import mlflow_client
 from amt.databricks.client import pin_auth_env
 
+HOST = "https://example.cloud.databricks.com"
+
 PAT = SimpleNamespace(
+    databricks_host=HOST,
     databricks_token="dapi-xxx",
     databricks_client_id="sp-id",
     databricks_client_secret="sp-secret",
     mlflow_tracking_uri="databricks",
 )
 SERVICE_PRINCIPAL = SimpleNamespace(
+    databricks_host=HOST,
     databricks_token=None,
     databricks_client_id="sp-id",
     databricks_client_secret="sp-secret",
@@ -27,7 +31,14 @@ SERVICE_PRINCIPAL = SimpleNamespace(
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # setenv, not delenv: monkeypatch then also undoes what the code under test writes.
-    monkeypatch.setenv("DATABRICKS_AUTH_TYPE", "unset")
+    for name in (
+        "DATABRICKS_AUTH_TYPE",
+        "DATABRICKS_HOST",
+        "DATABRICKS_TOKEN",
+        "DATABRICKS_CLIENT_ID",
+        "DATABRICKS_CLIENT_SECRET",
+    ):
+        monkeypatch.setenv(name, "unset")
 
 
 def test_a_pat_and_a_service_principal_together_resolve_to_the_pat() -> None:
@@ -39,6 +50,27 @@ def test_a_pat_and_a_service_principal_together_resolve_to_the_pat() -> None:
 def test_a_service_principal_alone_is_still_named() -> None:
     assert pin_auth_env(SERVICE_PRINCIPAL) == "oauth-m2m"
     assert os.environ["DATABRICKS_AUTH_TYPE"] == "oauth-m2m"
+
+
+def test_the_credential_itself_is_exported_not_just_the_auth_type() -> None:
+    """`.env` is invisible to MLflow, which then falls through to ~/.databrickscfg.
+
+    A `[DEFAULT]` profile there holding a username and password answers every
+    MLflow call with `403 should_change_password`, and nothing in the campaign
+    says why.
+    """
+    pin_auth_env(PAT)
+
+    assert os.environ["DATABRICKS_HOST"] == HOST
+    assert os.environ["DATABRICKS_TOKEN"] == "dapi-xxx"
+
+
+def test_a_service_principal_exports_its_pair_and_no_token() -> None:
+    pin_auth_env(SERVICE_PRINCIPAL)
+
+    assert os.environ["DATABRICKS_CLIENT_ID"] == "sp-id"
+    assert os.environ["DATABRICKS_CLIENT_SECRET"] == "sp-secret"
+    assert os.environ["DATABRICKS_TOKEN"] == "unset", "a stale PAT must not linger"
 
 
 def test_mlflow_is_pointed_at_databricks_as_that_identity(

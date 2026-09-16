@@ -62,6 +62,13 @@ class Settings(BaseSettings):
         default="Standard_DS3_v2", validation_alias=AliasChoices("AMT_NODE_TYPE_ID")
     )
     num_workers: int = Field(default=2, validation_alias=AliasChoices("AMT_NUM_WORKERS"))
+    # A job cluster with no access mode is a *non*-Unity-Catalog cluster, and a
+    # wheel on a UC Volume cannot be installed on one ("Libraries from Volumes
+    # are not allowed on non Unity Catalog cluster"). AMT also needs the
+    # caller's UC grants to read the source table, which is single-user access.
+    data_security_mode: str = Field(
+        default="SINGLE_USER", validation_alias=AliasChoices("AMT_DATA_SECURITY_MODE")
+    )
     existing_cluster_id: str | None = Field(
         default=None, validation_alias=AliasChoices("AMT_EXISTING_CLUSTER_ID")
     )
@@ -167,6 +174,7 @@ class Settings(BaseSettings):
             "spark_version": self.spark_version,
             "node_type_id": self.node_type_id,
             "num_workers": self.num_workers,
+            "data_security_mode": self.data_security_mode,
         }
 
     def resolved_checkpoint_db(self) -> Path:

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from langgraph.types import interrupt
 
 from amt.graph.deps import NodeDeps
-from amt.graph.human import parse_resume
+from amt.graph.human import gate_update, parse_resume
 from amt.graph.state import CampaignState, Stage
 from amt.schemas.qa import QADecision
 
@@ -100,12 +100,11 @@ def make_hc_conclusion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         decision = parse_resume(payload)
         status = "spec_review" if state.get("status") == "spec_review" else "done"
         return {
+            **gate_update(state, decision),
             "stage": Stage.DONE.value,
             "status": status,
-            "awaiting": None,
             "promotion_decision": decision.decision
             or ("promote" if decision.approved else "hold"),
-            "human_feedback": decision.feedback,
         }
 
     return hc_conclusion_node
