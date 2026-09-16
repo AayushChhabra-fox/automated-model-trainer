@@ -36,6 +36,30 @@ is refused rather than left to die on the cluster.
 These columns exist on every row without being declared: `item_id`, `history_length`,
 `item_train_count`, `item_train_rank`.
 
+### What a `grouped_rerank` recipe can actually read
+
+A render-grain split carries **only** `candidates`, `positions`, `labels`, `weights`,
+`user_id`, `ts` and the cohort columns the contract materialized (typically
+`client_name`). It carries **no per-candidate attributes**. Therefore:
+
+- Every per-item feature (`content_type`, `series_id`, `duration_seconds`, `genres`, ...)
+  must come from a `role: item_attributes` source — a UC table keyed by the contract's
+  item column, such as `pnr_prod.silver.pr_item_feature`. Listing those names under a
+  `split:` source does nothing; the job refuses a feature whose source resolves to no
+  values rather than training on constants.
+- Render-level features are the materialized cohort columns and nothing else. Read
+  `client_name` with a `cast … to: code`; there is no other request context.
+- Point-in-time item fields that change per render (`days_since_air_date`, `promo_value`)
+  are **not available**: the split does not carry them and the snapshot's current value
+  is banned. Leave recency out until materialization carries it.
+- There is **no account history** in grouped mode. `count … over: history` counts within
+  the render's own candidate list, not the account's past. A hypothesis that needs prior
+  conversions per account is infeasible here; say so instead of describing semantics the
+  runtime does not have.
+- The contract's relevance weights **are** applied in training: as sample weights for the
+  classifier families, as linear-gain integer grades for the reranker families. Do not
+  re-describe the weighting in the recipe; it is the contract's.
+
 ## Hard constraints
 
 Every feature must be computable at serving time from the user's history and the candidate

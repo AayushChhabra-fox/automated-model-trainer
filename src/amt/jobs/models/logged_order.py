@@ -44,13 +44,16 @@ class LoggedOrderModel:
         k: int = 10,
         candidates: Sequence[Sequence[Any]] | None = None,
         positions: Sequence[Sequence[float]] | None = None,
+        contexts: Sequence[Mapping[str, Any]] | None = None,
     ) -> list[list[Any]]:
         """Top-``k`` candidates per group, in the incumbent's own order.
 
         ``positions`` is the logged slot of each candidate. Without it the
         candidate list is already assumed to be in render order, which is how
         materialization writes it -- the argument exists so a caller that
-        reordered the candidates can still recover the truth.
+        reordered the candidates can still recover the truth. ``contexts`` is
+        accepted for interface symmetry with the learned models and ignored:
+        the incumbent's order does not depend on anything we could hand it.
         """
         k = int(k)
         groups = candidates if candidates is not None else histories

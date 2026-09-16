@@ -180,6 +180,21 @@ class EvalFrame:
         return len(self.user_ids)
 
     @property
+    def contexts(self) -> list[dict[str, Any]] | None:
+        """The carried render-level columns, one mapping per unit, for the model.
+
+        The same columns the cohort tables slice by are the only render-level
+        features a recipe can read (``client_name`` on a grouped split), so
+        they are handed to inference in that shape.
+        """
+        if not self.cohorts:
+            return None
+        return [
+            {column: values[i] for column, values in self.cohorts.items()}
+            for i in range(len(self.user_ids))
+        ]
+
+    @property
     def grouped(self) -> bool:
         return self.candidates is not None
 

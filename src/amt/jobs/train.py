@@ -213,7 +213,11 @@ def _evaluate_frame(model, frame, ks: Sequence[int], catalog_size: int, k_max: i
     """
     if frame.grouped:
         ranked = model.recommend(
-            frame.histories, k_max, candidates=frame.candidates, positions=frame.positions
+            frame.histories,
+            k_max,
+            candidates=frame.candidates,
+            positions=frame.positions,
+            contexts=frame.contexts,
         )
         catalog_size = frame.distinct_candidates or catalog_size
         gains = frame.gains
@@ -247,7 +251,7 @@ def _pointwise(model, frame) -> dict[str, float]:
     if scorer is None or not frame.candidates:
         return {}
     try:
-        scores, _groups, items = scorer(frame.histories, frame.candidates)
+        scores, _groups, items = scorer(frame.histories, frame.candidates, contexts=frame.contexts)
     except Exception:  # pragma: no cover - a family that cannot score candidates
         return {}
     if len(items) != len(scores):

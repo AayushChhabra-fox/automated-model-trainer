@@ -47,6 +47,11 @@ class _StubBackend:
                 "positives": float(np.sum(train["y"])),
                 "group_sizes": list(train["group_sizes"]),
                 "n_val_rows": None if validation is None else len(validation["X"]),
+                "y": [float(v) for v in train["y"]],
+                "weight": (
+                    None if train.get("weight") is None else [float(v) for v in train["weight"]]
+                ),
+                "columns": list(train["X"].columns),
             }
         )
         metric = params.get("eval_metric") or params.get("metric")

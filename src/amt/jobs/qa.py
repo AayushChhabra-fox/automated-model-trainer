@@ -67,16 +67,16 @@ def _load_pyfunc(model_uri: str):
 
 
 def _slice(frame, n: int):
-    from amt.jobs.data.features import EvalFrame
+    """The reproduction subset, sliced exactly as training sliced it.
 
-    return EvalFrame(
-        user_ids=frame.user_ids[:n],
-        histories=frame.histories[:n],
-        truths=frame.truths[:n],
-        days_since_last=(
-            frame.days_since_last[:n] if frame.days_since_last is not None else None
-        ),
-    )
+    Training and QA must take the *same* prefix with the *same* parallel
+    arrays -- candidates, positions, weights, cohorts -- or phase 0 re-scores a
+    different problem and fails "reproduces_logged_validation" for reasons that
+    have nothing to do with the artifact. One implementation, imported.
+    """
+    from amt.jobs.train import _slice_frame
+
+    return _slice_frame(frame, n)
 
 
 # --------------------------------------------------------------------------
@@ -148,7 +148,14 @@ def phase0(
         frame = build_eval_frame(val_df)
         n = int(frozen.get("reproduction_subset_size") or settings["subset_size"])
         subset = _slice(frame, min(n, len(frame.histories)))
-        ranked = recommend_with_pyfunc(model, subset.histories, k_max)
+        ranked = recommend_with_pyfunc(
+            model,
+            subset.histories,
+            k_max,
+            candidates=subset.candidates if subset.grouped else None,
+            positions=subset.positions if subset.grouped else None,
+            contexts=subset.contexts if subset.grouped else None,
+        )
         shape_ok = len(ranked) == len(subset.histories)
         checks.append(
             Check(
@@ -179,7 +186,16 @@ def phase0(
         or (frozen.get("val_metrics") or {}).get("catalog_size")
         or 0
     )
-    recomputed = evaluate(ranked, subset.truths, ks=ks, catalog_size=catalog_size)
+    if subset.grouped:
+        # Same catalog and the same relevance weights training scored with.
+        catalog_size = subset.distinct_candidates or catalog_size
+    recomputed = evaluate(
+        ranked,
+        subset.truths,
+        ks=ks,
+        catalog_size=catalog_size,
+        gains=subset.gains if subset.grouped else None,
+    )
 
     if not logged:
         checks.append(
@@ -308,6 +324,7 @@ def phase1(
             k_max,
             candidates=frame.candidates if grouped else None,
             positions=frame.positions if grouped else None,
+            contexts=frame.contexts if grouped else None,
         )
 
     cand_ranked = rank(candidate)

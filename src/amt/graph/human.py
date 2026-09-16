@@ -150,3 +150,78 @@ def apply_checklist(
         else:
             updated.append(hypothesis)
     return updated
+
+
+# --- rewinding an approved gate ------------------------------------------------
+
+#: Where a rewind re-enters the graph. The value is the node whose *outgoing*
+#: edges run next, so the campaign re-does everything after it.
+REWIND_TARGETS: dict[str, str] = {
+    # Re-propose the backlog: continue from the baseline, into planner_hypotheses.
+    "backlog": "run_baseline",
+    # Re-propose the shapes: continue from the approved backlog, into planner_feature_fit.
+    "feature": "hc_hypotheses",
+}
+
+
+def rewind_update(state: Mapping[str, Any], to: str, reason: str) -> tuple[str, dict[str, Any]]:
+    """``(as_node, values)`` that put a campaign back in front of an earlier gate.
+
+    An approved gate is final by design: the Trainer is clamped to the shape a
+    human signed off, and nothing downstream can reopen it. When the approved
+    document itself turns out to be unexecutable -- a recipe reading columns the
+    split does not carry -- the honest remedy is to go back and approve a
+    different one, not to let the run proceed on a shape that trains on nothing.
+
+    Nothing that ran is erased: ``experiment_history`` and every MLflow run stay.
+    Hypotheses that were mid-flight go back to ``pending`` and the budget slot
+    they took is returned; ``abandoned`` ones stay abandoned, because a human
+    struck them deliberately. ``reason`` reaches the planner as feedback.
+    """
+    if to not in REWIND_TARGETS:
+        raise ValueError(f"cannot rewind to {to!r}; choose one of {sorted(REWIND_TARGETS)}")
+    if state.get("frozen_champion") is not None:
+        raise ValueError("a frozen champion cannot be rewound; QA has begun. Start a new campaign.")
+
+    hypotheses = list(state.get("hypotheses") or [])
+    reopened = [h for h in hypotheses if h.status == "active"]
+    hypotheses = [
+        h.model_copy(update={"status": "pending"}) if h.status == "active" else h
+        for h in hypotheses
+    ]
+    budget = state.get("budget")
+    if budget is not None and reopened:
+        budget = budget.model_copy(
+            update={
+                "hypotheses_used": max(0, budget.hypotheses_used - len(reopened)),
+                "iterations_used": 0,
+            }
+        )
+
+    values: dict[str, Any] = {
+        "hypotheses": hypotheses,
+        "budget": budget,
+        "human_feedback": reason,
+        "status": "running",
+        "awaiting": None,
+        # Everything a shape approval produced.
+        "feature_fit_proposals": {},
+        "approved_shapes": {},
+        "approved_feature_recipe": None,
+        "approved_fit_spec": None,
+        "feature_fit_hash": "",
+        "feature_fit_approved": False,
+        # Everything a hypothesis selection produced.
+        "current_hypothesis_id": None,
+        "experiment_plan": None,
+        "current_config": None,
+        "iteration": 0,
+        "trainer_converged": False,
+        "convergence_reason": "",
+        "run_results": {},
+        "last_result": None,
+        "last_interpretation": None,
+    }
+    if to == "backlog":
+        values["hypotheses_approved"] = False
+    return REWIND_TARGETS[to], values

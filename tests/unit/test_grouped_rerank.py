@@ -619,3 +619,126 @@ def test_an_attribute_source_is_read_under_the_contracts_item_column():
     assert "entity_id AS item_id" in spark.sql_text
     assert spark.sql_text.count("entity_id") == 1, "the key is not selected twice"
     assert list(frames["traits"].columns) == ["item_id", "content_type"]
+
+
+# --- what a grouped recipe can read, and what reaches the booster -----------
+
+
+def _rendered_with_context(n_groups: int = 6) -> pd.DataFrame:
+    """A grouped split as materialization writes it: a cohort column and weights."""
+    frame = _rendered(n_groups)
+    frame["client_name"] = ["ROKU" if g % 2 == 0 else "FIRETV" for g in range(n_groups)]
+    frame["weights"] = [
+        [w if flag > 0 else 0.0 for flag, w in zip(labels, (1.0, 4.0, 9.0), strict=True)]
+        for labels in frame["labels"]
+    ]
+    return frame
+
+
+CONTEXT_RECIPE = {
+    **GROUPED_RECIPE,
+    "feature_columns": [
+        {"name": "client_code", "kind": "cast", "source": "client_name", "to": "code"},
+        {"name": "rank", "kind": "column", "source": "item_train_rank"},
+    ],
+}
+
+
+def test_a_render_level_column_is_a_feature_read_from_the_row(stub_backend):
+    from amt.jobs.models import tabular_common
+
+    model = tabular_common.fit_family(
+        "lightgbm_classifier",
+        _rendered_with_context(),
+        None,
+        {"feature_recipe": CONTEXT_RECIPE, "fit_spec": {"num_boost_round": 4}},
+    )
+
+    assert model.state.context_columns == ["client_name"]
+    assert model.state.attribute_columns == []
+    assert set(model.state.category_codes["client_name"]) == {"FIRETV", "ROKU"}
+    call = stub_backend.calls[-1]
+    assert call["columns"] == ["client_code", "rank"]
+
+
+def test_scoring_hands_the_render_context_to_the_model(stub_backend):
+    from amt.jobs.models import tabular_common
+
+    frame = _rendered_with_context(4)
+    model = tabular_common.fit_family(
+        "lightgbm_classifier",
+        frame,
+        None,
+        {"feature_recipe": CONTEXT_RECIPE, "fit_spec": {"num_boost_round": 4}},
+    )
+    eval_frame = build_eval_frame(frame)
+
+    # g0..g3 sort in render order, so the contexts line up with the rows.
+    assert eval_frame.contexts == [
+        {"client_name": "ROKU"},
+        {"client_name": "FIRETV"},
+        {"client_name": "ROKU"},
+        {"client_name": "FIRETV"},
+    ]
+    scores, _groups, _items = model.score(
+        eval_frame.histories, eval_frame.candidates, contexts=eval_frame.contexts
+    )
+    assert len(scores) == sum(len(c) for c in eval_frame.candidates)
+
+
+def test_a_feature_whose_source_resolves_to_nothing_is_refused(stub_backend):
+    """The first LFY recipe read `content_type` off a split that has no such column.
+
+    Training on it would have produced constant features and a model that
+    reproduces the tie rule. Refuse at fit time, naming the columns.
+    """
+    from amt.jobs.models import tabular_common
+
+    recipe = {
+        **GROUPED_RECIPE,
+        "feature_columns": [
+            {"name": "ct", "kind": "cast", "source": "content_type", "to": "code"},
+        ],
+    }
+    with pytest.raises(tabular_common.UnsupportedRecipe, match="content_type"):
+        tabular_common.fit_family(
+            "lightgbm_classifier",
+            _rendered(),
+            None,
+            {"feature_recipe": recipe, "fit_spec": {"num_boost_round": 4}},
+        )
+
+
+def test_the_contracts_weights_reach_a_classifier_as_sample_weights(stub_backend):
+    from amt.jobs.models import tabular_common
+
+    tabular_common.fit_family(
+        "lightgbm_classifier",
+        _rendered_with_context(),
+        None,
+        {"feature_recipe": CONTEXT_RECIPE, "fit_spec": {"num_boost_round": 4}},
+    )
+
+    call = stub_backend.calls[-1]
+    assert call["weight"] is not None
+    positives = [w for y, w in zip(call["y"], call["weight"], strict=True) if y > 0]
+    negatives = [w for y, w in zip(call["y"], call["weight"], strict=True) if y == 0]
+    assert set(positives) <= {1.0, 4.0, 9.0}, "a positive weighs 1/theta of its slot"
+    assert set(negatives) == {1.0}, "a negative weighs one"
+    assert set(call["y"]) == {0.0, 1.0}, "labels stay binary for a classifier"
+
+
+def test_the_contracts_weights_reach_a_reranker_as_linear_grades(stub_backend):
+    from amt.jobs.models import tabular_common
+
+    tabular_common.fit_family(
+        "lightgbm_reranker",
+        _rendered_with_context(),
+        None,
+        {"feature_recipe": CONTEXT_RECIPE, "fit_spec": {"num_boost_round": 4}},
+    )
+
+    call = stub_backend.calls[-1]
+    assert call["weight"] is None, "a ranker takes grades, not weights"
+    assert set(call["y"]) <= {0.0, 1.0, 4.0, 9.0}
+    assert call["params"]["label_gain"] == list(range(10)), "linear gain, not 2^grade - 1"

@@ -335,6 +335,18 @@ One review for all tabular hypotheses. The table prices each one:
 - **`same shape as …`** — two hypotheses that reduce to one `feature_fit_hash`
   are one experiment billed twice.
 - **`no feature columns`** — nothing to fit.
+- **Where each feature's column comes from.** A render-grain split carries
+  `candidates, positions, labels, weights, user_id, ts, client_name` and nothing
+  else. Every per-title feature (`content_type`, `series_id`, `duration_seconds`,
+  `genres`, …) must be backed by a `role: item_attributes` source — for this
+  rail, `pnr_prod.silver.pr_item_feature`. A recipe that lists those names under
+  a `split:` source is reading columns that do not exist; the job now refuses it
+  ("feature sources … have no values for any item") instead of training on
+  constants, but catch it here and save the cluster start. `client_name` is the
+  one render-level feature. `days_since_air_date` and `promo_value` are not
+  available in this mode. "Account history" does not exist in this mode either —
+  `count … over: history` counts inside the render — so a shape built on it is a
+  drop, not an approve.
 
 Same verbs. Dropping a shape here abandons its hypothesis.
 
@@ -427,6 +439,22 @@ cost no compute, so nothing else moves when you are arguing with the planner,
 and above 2 it is flagged. `trainer_asks_refused` appears when the Trainer
 asked to change the approved shape and was clamped; the run is still valid, the
 model just wanted more than it got.
+
+**An approved shape turns out to be unexecutable** (a recipe reading columns the
+split does not carry, an account-history feature in grouped mode). The gate is
+final by design and the Trainer is clamped to it, so the way out is to reopen the
+gate, not to resume:
+
+```bash
+uv run amt show   lfy-ctv-rerank-2026q3 --key approved_shapes   # see what was approved
+uv run amt rewind lfy-ctv-rerank-2026q3 --to feature \
+  -m "per-title features must come from pnr_prod.silver.pr_item_feature (role item_attributes); drop days_since_air_date and promo_value; there is no account history in grouped mode"
+```
+
+Nothing that ran is erased; the mid-flight hypothesis goes back to `pending` and
+its budget slot comes back; the planner redrafts every shape from your message and
+`HC_FEATURE` comes round again. `--to backlog` reopens the hypothesis list instead.
+Refused once a champion is frozen — after that, a new campaign.
 
 A Databricks failure currently **raises out of the graph** rather than being
 handed to the Trainer. The campaign is resumable — the checkpointer has

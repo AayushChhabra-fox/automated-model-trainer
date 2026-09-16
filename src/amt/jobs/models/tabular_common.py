@@ -230,6 +230,7 @@ class _State:
         train_value_counts: dict[str, dict[str, float]],
         category_codes: dict[str, dict[str, int]],
         feature_names: list[str],
+        context_columns: list[str] | None = None,
     ) -> None:
         self.catalog = catalog
         self.counts = counts
@@ -239,6 +240,10 @@ class _State:
         self.train_value_counts = train_value_counts
         self.category_codes = category_codes
         self.feature_names = feature_names
+        #: Render-level columns (``client_name`` ...) a grouped split carries on
+        #: the row. They describe the request, not the item, so they are read
+        #: from the render's context rather than from an attribute table.
+        self.context_columns = list(context_columns or [])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -250,6 +255,7 @@ class _State:
             "train_value_counts": self.train_value_counts,
             "category_codes": self.category_codes,
             "feature_names": self.feature_names,
+            "context_columns": self.context_columns,
         }
 
     @classmethod
@@ -266,6 +272,7 @@ class _State:
                 for col, mapping in (payload.get("category_codes") or {}).items()
             },
             feature_names=list(payload.get("feature_names") or []),
+            context_columns=list(payload.get("context_columns") or []),
         )
 
     def attribute_of(self, item: Any, column: str) -> Any:
@@ -317,24 +324,33 @@ def build_rows(
     state: _State,
     histories: Sequence[Sequence[Any]],
     candidates: Sequence[Sequence[Any]],
+    contexts: Sequence[Mapping[str, Any]] | None = None,
 ):
     """Build the numeric feature matrix for ``(history, candidate)`` pairs.
 
     Returns ``(X, group_index, item_ids)`` where ``group_index[i]`` is the index of
     the history row ``i`` belongs to -- the grouping the rankers train on and the
     grouping inference re-ranks within.
+
+    ``contexts`` is one mapping per unit with the render-level columns the
+    split carries (``state.context_columns``); each is broadcast to every
+    candidate of that unit. A model fitted with context columns and scored
+    without them sees the unknown code, so callers pass what they have.
     """
     import pandas as pd
 
     attribute_columns = state.attribute_columns
+    context_columns = state.context_columns
     raw: dict[str, list[Any]] = {name: [] for name in BASE_COLUMNS}
     raw.update({name: [] for name in attribute_columns})
+    raw.update({name: [] for name in context_columns})
     group_index: list[int] = []
     history_values: dict[str, list[list[Any]]] = {name: [] for name in attribute_columns}
     history_items: list[list[Any]] = []
 
     for row, (history, items) in enumerate(zip(histories, candidates, strict=True)):
         history = list(history or ())
+        context = contexts[row] if contexts is not None and row < len(contexts) else {}
         seen_attrs = {
             column: [state.attribute_of(item, column) for item in history]
             for column in attribute_columns
@@ -351,6 +367,8 @@ def build_rows(
             for column in attribute_columns:
                 raw[column].append(state.attribute_of(item, column))
                 history_values[column].append(seen_attrs[column])
+            for column in context_columns:
+                raw[column].append((context or {}).get(column))
             history_items.append(history)
 
     built: dict[str, np.ndarray] = {}
@@ -550,13 +568,15 @@ class _XGBoostBackend(_Backend):
 
     def fit(self, train, validation, params, rounds, early_stopping_rounds, ranker):
         xgboost = self._module()
-        dtrain = xgboost.DMatrix(train["X"], label=train["y"])
+        dtrain = xgboost.DMatrix(train["X"], label=train["y"], weight=train.get("weight"))
         if ranker:
             dtrain.set_group(train["group_sizes"])
         evals = []
         dval = None
         if validation is not None:
-            dval = xgboost.DMatrix(validation["X"], label=validation["y"])
+            dval = xgboost.DMatrix(
+                validation["X"], label=validation["y"], weight=validation.get("weight")
+            )
             if ranker:
                 dval.set_group(validation["group_sizes"])
             evals = [(dtrain, "train"), (dval, "validation")]
@@ -604,6 +624,7 @@ class _LightGBMBackend(_Backend):
         dtrain = lightgbm.Dataset(
             train["X"],
             label=train["y"],
+            weight=train.get("weight"),
             group=train["group_sizes"] if ranker else None,
             free_raw_data=False,
         )
@@ -613,6 +634,7 @@ class _LightGBMBackend(_Backend):
                 lightgbm.Dataset(
                     validation["X"],
                     label=validation["y"],
+                    weight=validation.get("weight"),
                     group=validation["group_sizes"] if ranker else None,
                     reference=dtrain,
                     free_raw_data=False,
@@ -692,8 +714,15 @@ class TabularModel:
     def feature_names(self) -> list[str]:
         return list(self.state.feature_names)
 
-    def score(self, histories: Sequence[Sequence[Any]], candidates: Sequence[Sequence[Any]]):
-        frame, groups, items = build_rows(self.recipe, self.state, histories, candidates)
+    def score(
+        self,
+        histories: Sequence[Sequence[Any]],
+        candidates: Sequence[Sequence[Any]],
+        contexts: Sequence[Mapping[str, Any]] | None = None,
+    ):
+        frame, groups, items = build_rows(
+            self.recipe, self.state, histories, candidates, contexts=contexts
+        )
         if len(frame) == 0:
             return np.zeros(0, dtype=np.float64), groups, items
         return self.backend.predict(self.booster, frame), groups, items
@@ -704,13 +733,16 @@ class TabularModel:
         k: int = 10,
         candidates: Sequence[Sequence[Any]] | None = None,
         positions: Sequence[Sequence[float]] | None = None,
+        contexts: Sequence[Mapping[str, Any]] | None = None,
     ) -> list[list[Any]]:
         """Top-``k`` items per unit: take or generate candidates, score, rank.
 
         ``candidates`` is supplied in ``grouped_rerank`` mode, where the set is
-        closed at what the container showed; ``positions`` is accepted for
-        interface symmetry with the incumbent and deliberately ignored, because
-        a model that scored on the slot it was given could not be served.
+        closed at what the container showed; ``contexts`` carries the render's
+        own columns (client, surface) for recipes that read them; ``positions``
+        is accepted for interface symmetry with the incumbent and deliberately
+        ignored, because a model that scored on the slot it was given could not
+        be served.
         """
         k = int(k)
         histories = [list(h or ()) for h in histories]
@@ -720,7 +752,7 @@ class TabularModel:
             ]
         else:
             candidates = [list(row or ()) for row in candidates]
-        scores, groups, items = self.score(histories, candidates)
+        scores, groups, items = self.score(histories, candidates, contexts=contexts)
 
         out: list[list[Any]] = [[] for _ in histories]
         if len(items) == 0:
@@ -876,34 +908,55 @@ def _sequences(train_df, user_col: str, item_col: str, ts_col: str) -> dict[Any,
     return build_sequences(train_df, user_col=user_col, item_col=item_col, ts_col=ts_col)
 
 
-def grouped_examples(
-    frame, max_rows: int
-) -> tuple[list[list[Any]], list[list[Any]], list[list[float]]]:
-    """``(candidates, positives, labels)`` read off a render-grain split.
+#: The largest graded relevance a ranker is handed: ``1 / propensity_floor`` at
+#: the contract's lowest allowed floor. Gains are linear in the grade
+#: (``label_gain = 0, 1, 2, ...``), matching the harness, not ``2^grade - 1``.
+MAX_GRADE = 50
 
-    One row per render, carrying the closed candidate set, the incumbent's
-    slots and the conversion labels. Nothing is generated and nothing is
-    sampled: the candidates are what the container showed.
+
+def grouped_rows(
+    frame, max_rows: int, context_columns: Sequence[str] = ()
+) -> dict[str, list[Any]]:
+    """Everything a fit reads off a render-grain split, one entry per render.
+
+    ``candidates`` is the closed set the container showed, ``labels`` the
+    conversion flags, ``weights`` the contract's relevance weights (``labels``
+    when the split carries none), ``contexts`` the render-level columns the
+    recipe reads. Nothing is generated and nothing is sampled. Renders nobody
+    converted in are skipped: they carry no signal for a ranker and no positive
+    for a classifier, and the harness excludes them too.
     """
-    candidates: list[list[Any]] = []
-    positives: list[list[Any]] = []
-    labels: list[list[float]] = []
+    out: dict[str, list[Any]] = {"candidates": [], "labels": [], "weights": [], "contexts": []}
+    columns = set(getattr(frame, "columns", ()))
     for row in frame.itertuples(index=False):
         items = list(getattr(row, "candidates", ()) or ())
         flags = [float(x) for x in (getattr(row, "labels", ()) or ())]
-        if len(items) < 2 or len(flags) != len(items):
+        if len(items) < 2 or len(flags) != len(items) or not any(f > 0 for f in flags):
             continue
-        converted = [item for item, flag in zip(items, flags, strict=True) if flag > 0]
-        if not converted:
-            # A render nobody converted in carries no signal for a ranker and
-            # no label for a classifier; the harness excludes it too.
-            continue
-        candidates.append(items)
-        positives.append(converted)
-        labels.append(flags)
-        if len(candidates) >= int(max_rows):
+        weights = (
+            [float(x) for x in (getattr(row, "weights", ()) or ())]
+            if "weights" in columns
+            else []
+        )
+        out["candidates"].append(items)
+        out["labels"].append(flags)
+        out["weights"].append(weights if len(weights) == len(items) else list(flags))
+        out["contexts"].append({c: getattr(row, c, None) for c in context_columns})
+        if len(out["candidates"]) >= int(max_rows):
             break
-    return candidates, positives, labels
+    return out
+
+
+def grouped_examples(
+    frame, max_rows: int
+) -> tuple[list[list[Any]], list[list[Any]], list[list[float]]]:
+    """``(candidates, positives, labels)`` read off a render-grain split."""
+    rows = grouped_rows(frame, max_rows)
+    positives = [
+        [item for item, flag in zip(items, flags, strict=True) if flag > 0]
+        for items, flags in zip(rows["candidates"], rows["labels"], strict=True)
+    ]
+    return rows["candidates"], positives, rows["labels"]
 
 
 def _labelled_examples(
@@ -999,24 +1052,46 @@ def _sample_negatives(
 def _grouped_dataset(
     recipe: Mapping[str, Any],
     state: _State,
-    candidates: Sequence[Sequence[Any]],
-    labels: Sequence[Sequence[float]],
+    rows: Mapping[str, Sequence[Any]],
+    ranker: bool = False,
 ) -> dict[str, Any] | None:
     """One labelled group per render, over the candidates the container showed.
 
     No negative sampling: every candidate is a real impression, and the rows
     that did not convert are the negatives. Sampling them would throw away the
     only thing that makes this a re-ranking problem.
+
+    The contract's relevance weights reach the booster here. A classifier gets
+    them as sample weights on the positives (negatives weigh 1); a ranker gets
+    them as integer grades with linear ``label_gain``, because a lambdarank
+    objective takes graded labels, not weights. Either way the objective is
+    the position-corrected one the contract describes, not plain BCE.
     """
+    candidates = list(rows.get("candidates") or [])
     if not candidates:
         return None
-    frame, groups, _items = build_rows(recipe, state, candidates, candidates)
+    labels = list(rows.get("labels") or [])
+    weights = list(rows.get("weights") or labels)
+    contexts = list(rows.get("contexts") or [])
+    frame, groups, _items = build_rows(
+        recipe, state, candidates, candidates, contexts=contexts or None
+    )
     y = np.asarray([label for row in labels for label in row], dtype=np.float64)
-    frame, y, groups = _apply_filters(recipe, frame, y, groups)
+    w = np.asarray([weight for row in weights for weight in row], dtype=np.float64)
+    frame, y, groups, w = _apply_filters(recipe, frame, y, groups, w)
     if len(frame) == 0:
         return None
     _, sizes = np.unique(groups, return_counts=True)
-    return {"X": frame, "y": y, "group_sizes": sizes.tolist()}
+    out: dict[str, Any] = {"group_sizes": sizes.tolist(), "X": frame}
+    positive = y > 0
+    if ranker:
+        grade = np.clip(np.rint(w), 1, MAX_GRADE)
+        out["y"] = np.where(positive, grade, 0.0)
+        out["max_label"] = int(out["y"].max()) if len(out["y"]) else 1
+    else:
+        out["y"] = y
+        out["weight"] = np.where(positive, np.maximum(w, 1.0), 1.0)
+    return out
 
 
 def _dataset(
@@ -1063,11 +1138,16 @@ def _dataset(
     return {"X": frame, "y": y, "group_sizes": sizes.tolist()}
 
 
-def _apply_filters(recipe: Mapping[str, Any], frame, y: np.ndarray, groups: np.ndarray):
-    """Row filters, applied only to columns the recipe actually produced."""
+def _apply_filters(
+    recipe: Mapping[str, Any], frame, y: np.ndarray, groups: np.ndarray, *extras: np.ndarray
+):
+    """Row filters, applied only to columns the recipe actually produced.
+
+    ``extras`` are further per-row arrays (sample weights) filtered alongside.
+    """
     rules = [r for r in (recipe.get("filters") or []) if str(r.get("column")) in frame.columns]
     if not rules:
-        return frame, y, groups
+        return (frame, y, groups, *extras)
 
     keep = np.ones(len(frame), dtype=bool)
     for rule in rules:
@@ -1092,7 +1172,12 @@ def _apply_filters(recipe: Mapping[str, Any], frame, y: np.ndarray, groups: np.n
             keep &= (~column.isin(list(value))).to_numpy()
         elif op == "not_null":
             keep &= column.notna().to_numpy()
-    return frame.loc[keep].reset_index(drop=True), y[keep], groups[keep]
+    return (
+        frame.loc[keep].reset_index(drop=True),
+        y[keep],
+        groups[keep],
+        *(extra[keep] for extra in extras),
+    )
 
 
 def _validation_examples(val_df, max_users: int) -> tuple[list[list[Any]], list[list[Any]]]:
@@ -1123,11 +1208,43 @@ def build_state(
     Catalog, popularity, item attributes and category codes. Kept separate from
     fitting so the same state can be rebuilt for inspection without a booster.
     """
+    from amt.jobs.data.features import CANDIDATES_COLUMN
+
     catalog, counts, ranks = _item_stats(train_df, item_col)
-    attribute_columns = _attribute_columns(recipe)
+    wanted = _attribute_columns(recipe)
+    frame_columns = set(getattr(train_df, "columns", ()))
+    # On a render-grain split a recipe column that sits on the row itself
+    # (`client_name`) describes the render, not the item: read it as context.
+    grouped = CANDIDATES_COLUMN in frame_columns
+    context_columns = [c for c in wanted if grouped and c in frame_columns]
+    attribute_columns = [c for c in wanted if c not in context_columns]
     attributes = _attribute_table(
         [train_df, *list((extra_frames or {}).values())], item_col, attribute_columns
     )
+
+    # A feature whose source resolves to nothing would train as a constant and
+    # the model would silently reproduce the tie rule. Refuse instead.
+    feature_sources = {
+        str(t.get(key))
+        for t in recipe.get("feature_columns") or []
+        for key in ("source", "of")
+        if t.get(key) and t.get(key) not in BASE_COLUMNS
+    }
+    unresolved = sorted(
+        c
+        for c in attribute_columns
+        if c in feature_sources and not any(c in bucket for bucket in attributes.values())
+    )
+    if unresolved:
+        raise UnsupportedRecipe(
+            f"feature sources {unresolved} have no values for any item. On a render-grain "
+            "split, per-item columns must come from a `role: item_attributes` source "
+            f"(the split carries {sorted(frame_columns)}); render-level columns are read "
+            "from the row only when the contract materialized them."
+        )
+
+    codes = _category_codes(attributes, attribute_columns)
+    codes.update(_context_codes(train_df, context_columns))
     return _State(
         catalog=catalog,
         counts=counts,
@@ -1135,9 +1252,20 @@ def build_state(
         attributes=attributes,
         attribute_columns=attribute_columns,
         train_value_counts=_train_value_counts(recipe, attributes, counts),
-        category_codes=_category_codes(attributes, attribute_columns),
+        category_codes=codes,
         feature_names=[str(t["name"]) for t in recipe["feature_columns"]],
+        context_columns=context_columns,
     )
+
+
+def _context_codes(train_df, columns: Sequence[str]) -> dict[str, dict[str, int]]:
+    """Stable 1-based codes for string-valued render-level columns; 0 is unseen."""
+    codes: dict[str, dict[str, int]] = {}
+    for column in columns:
+        values = [v for v in train_df[column].tolist() if not _is_missing(v)]
+        if values and not all(isinstance(v, (int, float, bool)) for v in values):
+            codes[column] = {v: i + 1 for i, v in enumerate(sorted({str(v) for v in values}))}
+    return codes
 
 
 def fit_family(
@@ -1167,18 +1295,23 @@ def fit_family(
     negatives = int(flat["negative_samples_per_positive"])
 
     if grouped:
-        # Render grain: the candidates, their order and their labels are all on
-        # the row, so there is nothing to generate or sample.
-        candidates, _positives, labels = grouped_examples(
-            train_df, int(flat["max_train_rows"])
+        # Render grain: the candidates, their order, their labels and the
+        # contract's relevance weights are all on the row; nothing is generated
+        # or sampled.
+        train_set = _grouped_dataset(
+            recipe,
+            state,
+            grouped_rows(train_df, int(flat["max_train_rows"]), state.context_columns),
+            ranker=ranker,
         )
-        train_set = _grouped_dataset(recipe, state, candidates, labels)
         val_set = None
         if val_df is not None and len(val_df):
-            val_candidates, _vp, val_labels = grouped_examples(
-                val_df, int(flat["max_validation_users"])
+            val_set = _grouped_dataset(
+                recipe,
+                state,
+                grouped_rows(val_df, int(flat["max_validation_users"]), state.context_columns),
+                ranker=ranker,
             )
-            val_set = _grouped_dataset(recipe, state, val_candidates, val_labels)
     else:
         sequences = _sequences(train_df, user_col, item_col, ts_col)
         histories, positives = _labelled_examples(
@@ -1220,6 +1353,15 @@ def fit_family(
     else:
         params["metric"] = eval_metric
         params.setdefault("verbosity", -1)
+    if ranker and grouped:
+        # Graded labels are the contract's linear relevance weights; the
+        # booster's gain must be linear too, or a slot-3 conversion (grade 20)
+        # would count 2^20 under LightGBM's default `2^grade - 1`.
+        top = max(int(train_set.get("max_label") or 1), int((val_set or {}).get("max_label") or 1))
+        if backend.name == "xgboost":
+            params.setdefault("ndcg_exp_gain", False)
+        else:
+            params.setdefault("label_gain", list(range(top + 1)))
 
     booster, curve, best_iteration = backend.fit(
         train_set,

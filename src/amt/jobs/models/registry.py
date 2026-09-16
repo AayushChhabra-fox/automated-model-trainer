@@ -203,6 +203,13 @@ class RecommenderPyfunc(_PythonModel):  # type: ignore[valid-type,misc]
         for column in ("candidates", "positions"):
             if hasattr(model_input, "columns") and column in model_input.columns:
                 extra[column] = [as_item_list(v) for v in model_input[column].tolist()]
+        if hasattr(model_input, "columns") and "context" in model_input.columns:
+            # One JSON object per unit: the render-level columns a grouped
+            # recipe may read (`client_name` ...). Same shape training saw.
+            extra["contexts"] = [
+                json.loads(v) if isinstance(v, str) else dict(v or {})
+                for v in model_input["context"].tolist()
+            ]
         ranked = self.model.recommend(histories, k, **extra)
         trimmed = [list(r)[: ks[i]] for i, r in enumerate(ranked)]
 
@@ -283,12 +290,14 @@ def recommend_with_pyfunc(
     k: int = 10,
     candidates: Sequence[Sequence[Any]] | None = None,
     positions: Sequence[Sequence[float]] | None = None,
+    contexts: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[list[Any]]:
     """Call a loaded pyfunc model through its declared serving interface.
 
     QA uses this rather than the trainer's in-memory object: same math,
     different code path (PLAN §6, "QA independence"). ``candidates`` carries
-    the closed impression set in ``grouped_rerank`` mode.
+    the closed impression set in ``grouped_rerank`` mode and ``contexts`` the
+    render-level columns the split carried.
     """
     import pandas as pd
 
@@ -300,6 +309,8 @@ def recommend_with_pyfunc(
         columns["candidates"] = [json.dumps(list(c), default=str) for c in candidates]
     if positions is not None:
         columns["positions"] = [json.dumps(list(p), default=str) for p in positions]
+    if contexts is not None:
+        columns["context"] = [json.dumps(dict(c or {}), default=str) for c in contexts]
     frame = pd.DataFrame(columns)
     try:
         out = pyfunc_model.predict(frame)

@@ -210,3 +210,69 @@ def test_only_non_blank_differences_count_as_asks():
     assert _structural_asks(APPROVED_FIT, APPROVED_FIT.model_copy(update={"seed": 7})) == [
         "fit_spec.seed=7 (kept 42)"
     ]
+
+
+# --- rewinding an approved gate -------------------------------------------
+
+
+def _mid_flight_state():
+    from amt.schemas.common import ExperimentBudget
+
+    hypotheses = [
+        BACKLOG[0].model_copy(update={"status": "active"}),
+        BACKLOG[1],
+        BACKLOG[2].model_copy(update={"status": "abandoned"}),
+    ]
+    return {
+        "hypotheses": hypotheses,
+        "hypotheses_approved": True,
+        "budget": ExperimentBudget(max_hypotheses=3, hypotheses_used=1, iterations_used=2),
+        "approved_shapes": {"H1": object()},
+        "approved_feature_recipe": object(),
+        "feature_fit_hash": "abc",
+        "feature_fit_approved": True,
+        "current_hypothesis_id": "H1",
+        "experiment_plan": object(),
+        "experiment_history": ["kept"],
+        "frozen_champion": None,
+    }
+
+
+def test_rewinding_to_the_feature_gate_reopens_the_shapes_and_returns_the_budget_slot():
+    from amt.graph.human import rewind_update
+
+    as_node, values = rewind_update(_mid_flight_state(), "feature", "recipe read missing columns")
+
+    assert as_node == "hc_hypotheses", "re-enter through the approved backlog"
+    assert values["approved_shapes"] == {} and values["approved_feature_recipe"] is None
+    assert values["feature_fit_approved"] is False and values["feature_fit_hash"] == ""
+    assert values["current_hypothesis_id"] is None and values["experiment_plan"] is None
+    assert _statuses(values["hypotheses"]) == {"H1": "pending", "H2": "pending", "H3": "abandoned"}
+    assert values["budget"].hypotheses_used == 0 and values["budget"].iterations_used == 0
+    assert values["human_feedback"] == "recipe read missing columns"
+    assert "hypotheses_approved" not in values, "the backlog approval stands"
+    assert "experiment_history" not in values, "what ran is not erased"
+
+
+def test_rewinding_to_the_backlog_unapproves_it():
+    from amt.graph.human import rewind_update
+
+    as_node, values = rewind_update(_mid_flight_state(), "backlog", "wrong ideas")
+
+    assert as_node == "run_baseline"
+    assert values["hypotheses_approved"] is False
+
+
+def test_a_frozen_champion_cannot_be_rewound():
+    from amt.graph.human import rewind_update
+
+    state = {**_mid_flight_state(), "frozen_champion": object()}
+    with pytest.raises(ValueError, match="frozen"):
+        rewind_update(state, "feature", "too late")
+
+
+def test_an_unknown_rewind_target_is_refused():
+    from amt.graph.human import rewind_update
+
+    with pytest.raises(ValueError, match="backlog"):
+        rewind_update(_mid_flight_state(), "hc3", "no")

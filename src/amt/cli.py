@@ -321,6 +321,42 @@ def resume(
 
 
 @app.command()
+def rewind(
+    campaign: str = typer.Argument(..., help="Campaign id."),
+    to: str = typer.Option(
+        ..., "--to", help="Gate to reopen: `feature` (re-propose shapes) or `backlog`."
+    ),
+    message: str = typer.Option(
+        ..., "--message", "-m", help="Why — the planner redrafts from this."
+    ),
+    mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
+) -> None:
+    """Reopen an approved HC_FEATURE or HC_BACKLOG gate and re-run from there.
+
+    For when the approved document itself cannot execute — a recipe that reads
+    columns the split does not carry. Nothing that ran is erased; mid-flight
+    hypotheses return to `pending` and their budget slot comes back. Refused
+    once a champion is frozen: a new campaign is the only honest path then.
+    """
+    from amt.graph.human import rewind_update
+
+    graph = _build(mock, campaign)
+    state = _state(graph, campaign)
+    if not state:
+        console.print(f"[red]No campaign named {campaign!r}.[/red]")
+        raise typer.Exit(code=1)
+    try:
+        as_node, values = rewind_update(state, to, message)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    graph.update_state(_config(campaign), values, as_node=as_node)
+    console.print(f"[yellow]rewound[/yellow] to after [bold]{as_node}[/bold]; re-running")
+    _run(graph, None, campaign)
+    _report_position(graph, campaign)
+
+
+@app.command()
 def run(
     campaign: str = typer.Argument(..., help="Campaign id."),
     mock: bool = typer.Option(False, "--mock", help="Offline dry run."),
