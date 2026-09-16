@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -1351,7 +1352,13 @@ def fit_family(
     if backend.name == "xgboost":
         params["eval_metric"] = eval_metric
     else:
-        params["metric"] = eval_metric
+        # `ndcg@4` is xgboost's spelling; LightGBM wants `metric: ndcg` and
+        # `eval_at: [4]` (and then names the curve `ndcg@4`, which is what the
+        # history reader looks up -- so `eval_metric` itself stays as written).
+        cutoff = re.fullmatch(r"(ndcg|map)@(\d+)", eval_metric)
+        params["metric"] = cutoff.group(1) if cutoff else eval_metric
+        if cutoff:
+            params.setdefault("eval_at", [int(cutoff.group(2))])
         params.setdefault("verbosity", -1)
     if ranker and grouped:
         # Graded labels are the contract's linear relevance weights; the

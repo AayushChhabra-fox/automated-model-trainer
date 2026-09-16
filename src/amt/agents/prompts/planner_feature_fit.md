@@ -26,12 +26,17 @@ Rows are `(user history, candidate item)` pairs. Declare:
 
 ### The candidate-row budget
 
-Feature building materialises one row per (evaluation unit × candidate), so
-`n × validation_split.row_count` is the size of the frame this job builds in memory.
+Feature building materialises one row per (evaluation unit × candidate). For the
+generating strategies (`popularity_topn`, `history_attribute_expansion`)
+`n × validation_split.row_count` is the size of the frame this job builds in memory;
 `max_candidate_rows` in the context is the cap. Compute the product, state it in
 `rationale`, and choose an `n` that stays under the cap — a plausible-looking `n = 200`
-against a 44 000-row validation split is 8.8 million rows, and a job that exceeds the cap
-is refused rather than left to die on the cluster.
+against a 44 000-row validation split is 8.8 million rows.
+
+For `logged_impressions` the candidate set is closed at what the container showed:
+rows = renders × tiles shown (3–5), and `n` is **not applied** — do not compute or
+reason about `n × renders`, and do not pick `n` to fit a budget. Set `n` to the
+contract's `k` and move on.
 
 These columns exist on every row without being declared: `item_id`, `history_length`,
 `item_train_count`, `item_train_rank`.

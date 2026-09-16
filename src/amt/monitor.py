@@ -144,7 +144,17 @@ def shape_rows(payload: dict) -> list[dict[str, str]]:
         candidates = shape.get("candidate_generation") or {}
         fit = shape.get("fit_spec") or {}
         n = int(candidates.get("n") or 0)
-        estimated = validation_rows * n
+        strategy = str(candidates.get("strategy") or "?")
+        if strategy == "logged_impressions":
+            # The candidate set is closed at what the container showed -- `n`
+            # is never applied, and pricing it as `n × renders` once sent a
+            # planner chasing a 49.7M-row budget that did not exist.
+            candidates_cell = "logged_impressions (closed set; n not applied)"
+            estimated_cell = f"{validation_rows:,} renders × tiles shown" if validation_rows else "unknown"
+        else:
+            candidates_cell = f"{strategy} n={n}"
+            estimated = validation_rows * n
+            estimated_cell = f"{estimated:,}" if estimated else "unknown"
         notes = []
         if duplicates.get(hypothesis_id):
             notes.append(f"same shape as {', '.join(duplicates[hypothesis_id])}")
@@ -154,8 +164,8 @@ def shape_rows(payload: dict) -> list[dict[str, str]]:
             {
                 "id": hypothesis_id,
                 "family": str(shape.get("family") or ""),
-                "candidates": f"{candidates.get('strategy') or '?'} n={n}",
-                "est. rows": f"{estimated:,}" if estimated else "unknown",
+                "candidates": candidates_cell,
+                "est. rows": estimated_cell,
                 "fit": "\n".join(
                     f"{key}={fit.get(key)}" for key in FIT_FIELDS if fit.get(key) not in ("", None)
                 ),

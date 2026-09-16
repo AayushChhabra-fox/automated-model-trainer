@@ -742,3 +742,18 @@ def test_the_contracts_weights_reach_a_reranker_as_linear_grades(stub_backend):
     assert call["weight"] is None, "a ranker takes grades, not weights"
     assert set(call["y"]) <= {0.0, 1.0, 4.0, 9.0}
     assert call["params"]["label_gain"] == list(range(10)), "linear gain, not 2^grade - 1"
+
+
+def test_lightgbm_gets_ndcg_and_eval_at_when_the_fit_spec_says_ndcg_at_4(stub_backend):
+    """`ndcg@4` is xgboost's spelling; LightGBM rejects it as a metric name."""
+    from amt.jobs.models import tabular_common
+
+    tabular_common.fit_family(
+        "lightgbm_reranker",
+        _rendered_with_context(),
+        None,
+        {"feature_recipe": CONTEXT_RECIPE, "fit_spec": {"num_boost_round": 4, "eval_metric": "ndcg@4"}},
+    )
+
+    params = stub_backend.calls[-1]["params"]
+    assert params["metric"] == "ndcg" and params["eval_at"] == [4]
