@@ -149,15 +149,52 @@ def resolve_cfg(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
     return flat
 
 
+#: Backend parameter names (and their aliases) that AMT itself controls from the
+#: approved FitSpec: the round count and early stopping run through the fit
+#: call, and objective / metric / seed / gain come from the shape a human
+#: approved. A Trainer key that lands on one of these -- `training:
+#: {early_stopping: true}` resolved by LightGBM to `early_stopping_round=True`
+#: -- must not reach the booster, where it either overrides the approved value
+#: or dies on a type check twenty minutes into a cluster run.
+RESERVED_BOOSTER_KEYS = frozenset(
+    {
+        # iterations
+        "num_boost_round", "num_iterations", "num_iteration", "n_iter", "num_tree",
+        "num_trees", "num_round", "num_rounds", "nrounds", "n_estimators", "max_iter",
+        # early stopping
+        "early_stopping", "early_stopping_round", "early_stopping_rounds", "n_iter_no_change",
+        # objective / metric
+        "objective", "objective_type", "app", "application", "loss", "metric", "metrics",
+        "metric_types", "eval_metric",
+        # reproducibility / gain
+        "seed", "random_seed", "random_state", "label_gain", "eval_at", "ndcg_eval_at",
+        "ndcg_at", "ndcg_exp_gain",
+    }
+)
+
+
 def _booster_params(flat: Mapping[str, Any]) -> dict[str, Any]:
-    """Scalar hyperparameters only: the boosters reject structured values."""
+    """Scalar hyperparameters only, minus anything AMT sets itself.
+
+    The boosters reject structured values, and :data:`RESERVED_BOOSTER_KEYS`
+    are dropped rather than passed: they are set from the FitSpec in
+    :func:`fit_family`, and a duplicate under an alias would silently win.
+    Dropped keys are reported on stdout so the job log says what was ignored.
+    """
     params = flat.get("booster_params")
     if not isinstance(params, Mapping):
         return {}
+    dropped = sorted(k for k in params if str(k).lower() in RESERVED_BOOSTER_KEYS)
+    if dropped:
+        print(
+            f"[amt] ignoring booster_params {dropped}: these are set from the approved "
+            "FitSpec (rounds, early stopping, objective, metric, seed), not from hyperparameters"
+        )
     return {
         k: v
         for k, v in params.items()
-        if isinstance(v, (int, float, bool, str, list, tuple))
+        if str(k).lower() not in RESERVED_BOOSTER_KEYS
+        and isinstance(v, (int, float, bool, str, list, tuple))
     }
 
 

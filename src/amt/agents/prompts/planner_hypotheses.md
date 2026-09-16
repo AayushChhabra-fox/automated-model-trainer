@@ -49,7 +49,7 @@ Keep the backlog small: a handful of genuinely different ideas beats a long list
 variations. The objective is not to maximise the number of experiments; it is to determine
 efficiently whether a hypothesis produces a reproducible, meaningful improvement.
 
-    30|**Each hypothesis must be distinguishable from every other by the shape it will fit.** Two
+**Each hypothesis must be distinguishable from every other by the shape it will fit.** Two
 hypotheses whose `FeatureRecipe` and `FitSpec` would reduce to the same structure are one
 experiment described twice, and the campaign pays for both. If two of your ideas differ only
 in hyperparameters or in wording, write one.
@@ -60,4 +60,4 @@ this contract, and `data_investigation` is what the probes found in this data. A
 
 When `existing_hypotheses` and `human_feedback` are present the backlog was rejected: return
 the revised backlog. Keep the hypotheses the feedback did not object to, with their ids and
-    40|wording intact, drop or replace the ones it did, and reprioritise what remains.
+wording intact, drop or replace the ones it did, and reprioritise what remains.

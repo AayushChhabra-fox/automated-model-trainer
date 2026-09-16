@@ -785,3 +785,26 @@ def test_a_fit_survives_the_array_columns_spark_actually_hands_over(stub_backend
         eval_frame.histories, 3, candidates=eval_frame.candidates, contexts=eval_frame.contexts
     )
     assert all(sorted(r) == sorted(c) for r, c in zip(ranked, eval_frame.candidates, strict=True))
+
+
+def test_training_controls_never_reach_the_booster_as_hyperparameters(stub_backend):
+    """`training: {early_stopping: true}` resolved to LightGBM's early_stopping_round=True."""
+    from amt.jobs.models import tabular_common
+
+    tabular_common.fit_family(
+        "lightgbm_classifier",
+        _rendered_with_context(),
+        _rendered_with_context(3),
+        {
+            "feature_recipe": CONTEXT_RECIPE,
+            "fit_spec": {"num_boost_round": 4, "early_stopping_rounds": 2, "seed": 7},
+            "training": {"early_stopping": True, "num_iterations": 999, "learning_rate": 0.2},
+        },
+    )
+
+    call = stub_backend.calls[-1]
+    params = call["params"]
+    assert "early_stopping" not in params and "early_stopping_round" not in params
+    assert "num_iterations" not in params
+    assert params["learning_rate"] == 0.2, "a real hyperparameter still gets through"
+    assert params["seed"] == 7 and call["rounds"] == 4 and call["early_stopping_rounds"] == 2
