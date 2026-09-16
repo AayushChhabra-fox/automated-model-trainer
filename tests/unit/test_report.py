@@ -381,3 +381,81 @@ def test_the_validation_verdict_is_computed_not_narrated():
     assert abs(h4["delta"] - (-0.0376)) < 1e-4
     assert abs(h4["relative_delta"] - (-0.0475)) < 1e-3
     assert validation_verdict({}, [], "ndcg@4") is None
+
+
+def test_the_verdict_finds_the_incumbent_under_the_prefix_state_actually_stores():
+    """`baseline_metrics` is a run's `validation_metrics`, so keys carry `val/`.
+
+    The contract's `primary_metric` is bare. A raw lookup across that gap
+    returns `None`, produces no delta, and leaves `any_beats_baseline` false
+    for every champion -- which clamps a winning campaign to
+    `hypothesis_rejected`.
+    """
+    from types import SimpleNamespace
+
+    from amt.graph.nodes.conclusion import validation_verdict
+
+    champion = [SimpleNamespace(hypothesis_id="H1", primary_metric_value=0.60)]
+
+    verdict = validation_verdict({"val/ndcg@4": 0.50}, champion, "ndcg@4")
+
+    assert verdict["any_beats_baseline"] is True
+    row = verdict["champions"][0]
+    assert row["baseline_ndcg@4"] == 0.50
+    assert abs(row["delta"] - 0.10) < 1e-9
+    assert row["beats_baseline"] is True
+
+
+def test_a_champion_that_loses_is_still_reported_as_losing():
+    """The fix must not turn the clamp off -- Phase 8's rail genuinely lost."""
+    from types import SimpleNamespace
+
+    from amt.graph.nodes.conclusion import validation_verdict
+
+    verdict = validation_verdict(
+        {"val/ndcg@4": 0.7839},
+        [SimpleNamespace(hypothesis_id="H4", primary_metric_value=0.7315)],
+        "ndcg@4",
+    )
+
+    assert verdict["any_beats_baseline"] is False
+    assert verdict["champions"][0]["beats_baseline"] is False
+
+
+def test_a_metric_is_found_whether_or_not_it_carries_a_split_prefix():
+    from amt.schemas.run_result import metric_value
+
+    assert metric_value({"ndcg@4": 1.0}, "ndcg@4") == 1.0
+    assert metric_value({"val/ndcg@4": 2.0}, "ndcg@4") == 2.0
+    assert metric_value({"validation/ndcg@4": 3.0}, "ndcg@4") == 3.0
+    assert metric_value({"qa/ndcg@4": 4.0}, "ndcg@4") is None
+    assert metric_value({}, "ndcg@4") is None
+
+
+def test_the_champion_gate_lines_the_baseline_and_the_candidate_up_on_one_row():
+    """The gate's whole job is the delta, and a split key shows none."""
+    from types import SimpleNamespace
+
+    from amt import monitor
+    from amt.graph.nodes.champion import _comparison
+
+    comparison = _comparison(
+        {"baseline_metrics": {"val/ndcg@4": 0.50, "val/hitrate@1": 0.40}},
+        [
+            SimpleNamespace(
+                hypothesis_id="H1",
+                primary_metric_value=0.60,
+                secondary_metrics={"val/ndcg@4": 0.60, "val/hitrate@1": 0.45},
+            )
+        ],
+        SimpleNamespace(primary_metric="ndcg@4"),
+    )
+
+    assert [row["label"] for row in comparison] == ["baseline", "H1"]
+    # One row per metric, not one per spelling of it.
+    assert set(comparison[0]["metrics"]) == {"ndcg@4", "hitrate@1"}
+    assert set(comparison[1]["metrics"]) == {"ndcg@4", "hitrate@1"}
+
+    rows = monitor.champion_rows({"primary_metric": "ndcg@4", "comparison": comparison})
+    assert rows[0]["metric"] == "ndcg@4"
+    assert rows[0]["Δ H1 vs baseline"].startswith("+0.1000 (+20.0%)")

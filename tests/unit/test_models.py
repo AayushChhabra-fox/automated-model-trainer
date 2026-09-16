@@ -177,11 +177,23 @@ def test_recommend_with_pyfunc_matches_the_model_directly():
     )
 
 
-def test_pyfunc_signature_declares_the_history_column():
+def test_pyfunc_signature_declares_every_column_a_grouped_replay_sends():
+    """Grouped re-ranking scores a render, not a history.
+
+    QA replays the frozen artifact through this signature, so a column missing
+    here is a column MLflow drops on the way in -- which is how a grouped
+    candidate set silently became an empty one.
+    """
     signature = registry.pyfunc_signature()
     if signature is None:
         pytest.skip("mlflow not installed")
-    assert [c.name for c in signature.inputs.inputs] == ["history", "k"]
+    assert [c.name for c in signature.inputs.inputs] == [
+        "history",
+        "k",
+        "candidates",
+        "positions",
+        "context",
+    ]
 
 
 # -- sasrec ----------------------------------------------------------------

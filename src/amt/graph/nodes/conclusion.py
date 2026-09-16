@@ -20,6 +20,7 @@ from amt.schemas.conclusion import (
     ProxySanity,
 )
 from amt.schemas.qa import QADecision
+from amt.schemas.run_result import metric_value
 
 
 def make_conclusion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
@@ -90,7 +91,10 @@ def validation_verdict(
     """
     if not primary or not champions:
         return None
-    base = baseline.get(primary)
+    # `baseline_metrics` is the baseline run's `validation_metrics`, whose keys
+    # carry the `val/` prefix, while `primary_metric` is bare. A raw `.get`
+    # here reported every champion as failing to beat the incumbent.
+    base = metric_value(baseline, primary)
     rows = []
     for champion in champions:
         value = champion.primary_metric_value

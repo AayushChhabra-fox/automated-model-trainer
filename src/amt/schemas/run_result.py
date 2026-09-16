@@ -14,6 +14,22 @@ Verdict = Literal["improved", "no_change", "regressed", "failed"]
 RunRole = Literal["baseline", "train", "qa0", "qa1", "final", "materialize"]
 
 
+def metric_value(metrics: dict[str, float], metric: str) -> float | None:
+    """Look up ``metric`` in ``metrics``, tolerating the split prefix.
+
+    The harness emits bare metric names; ``train.py`` logs them under ``val/``
+    and MLflow keeps that prefix, so the same number reaches campaign state
+    spelled two ways. Anything comparing a contract's ``primary_metric``
+    against a stored metrics dict has to go through here: a raw ``.get`` looks
+    like it works, silently returns ``None`` for the prefixed half, and turns
+    "the candidate won" into "no comparison was produced".
+    """
+    for key in (metric, f"val/{metric}", f"validation/{metric}"):
+        if key in metrics:
+            return metrics[key]
+    return None
+
+
 class TrainingRunResult(AmtModel):
     """Compact result of one Databricks training (or baseline) run.
 
@@ -46,10 +62,7 @@ class TrainingRunResult(AmtModel):
 
     def primary(self, metric: str) -> float | None:
         """Validation value of ``metric`` accepting bare or ``val/``-prefixed keys."""
-        for key in (metric, f"val/{metric}", f"validation/{metric}"):
-            if key in self.validation_metrics:
-                return self.validation_metrics[key]
-        return None
+        return metric_value(self.validation_metrics, metric)
 
 
 class RunSummary(AmtModel):

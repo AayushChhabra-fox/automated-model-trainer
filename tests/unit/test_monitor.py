@@ -140,10 +140,18 @@ def test_each_checklist_checkpoint_has_rows_and_the_others_do_not():
     assert summary_rows({"checkpoint": "HC_BACKLOG", "hypotheses": [{}]})
     assert summary_rows({"checkpoint": "HC_FEATURE", "shapes": {"h1": {}}})
     assert summary_rows(
-        {"checkpoint": "HC_CHAMPION", "comparison": [{"label": "baseline", "metrics": {}}]}
+        {
+            "checkpoint": "HC_CHAMPION",
+            # A comparison with no metrics in it has nothing to table; the
+            # rows are metrics, so one has to be present to get a row.
+            "comparison": [{"label": "baseline", "metrics": {"ndcg@4": 0.5}}],
+        }
     )
+    assert summary_rows({"checkpoint": "HC4", "conclusion": {"recommendation": "reject"}})
     assert summary_rows({"checkpoint": "HC2"}) is None
     assert summary_rows({"checkpoint": "HC_FEATURE", "shapes": {}}) == []
+    assert summary_rows({"checkpoint": "HC_CHAMPION", "comparison": []}) == []
+    assert summary_rows({"checkpoint": "HC4", "conclusion": None}) == []
 
 
 def test_the_champion_table_puts_the_primary_first_and_shows_the_delta():

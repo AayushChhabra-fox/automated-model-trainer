@@ -18,15 +18,19 @@ from typing import Any
 __all__ = [
     "FIT_FIELDS",
     "PREVIEW_CHARS",
+    "REWIND_EFFECTS",
     "backlog_rows",
     "champion_rows",
     "checkpoint_document",
+    "checkpoint_prose",
     "clip",
+    "conclusion_rows",
     "config_for",
     "list_campaigns",
     "masked_settings",
     "pending_interrupt",
     "report_rows",
+    "rewind_targets",
     "shape_rows",
     "state",
     "summary_rows",
@@ -287,6 +291,133 @@ def report_rows(report: Any) -> list[dict[str, str]]:
     return rows
 
 
+#: The narrative fields of a conclusion, in the order they argue: what was
+#: asked, what was found, what it means. Rendered as prose, because they are
+#: paragraphs -- as JSON string values they are a wall of `\n` escapes.
+_CONCLUSION_PROSE = (
+    ("problem", "problem"),
+    ("hypothesis", "hypothesis"),
+    ("why_selected", "why this model"),
+    ("validation_evidence", "validation evidence"),
+    ("qa_evidence", "QA evidence"),
+    ("cohort_effects", "cohort effects"),
+    ("operational_considerations", "operational considerations"),
+    ("recommendation_rationale", "rationale"),
+)
+
+
+def conclusion_rows(payload: dict) -> list[dict[str, str]]:
+    """HC4's decision as a few lines, ahead of the argument that supports it.
+
+    The conclusion is the largest document in a campaign -- `report_markdown`
+    alone is a page of prose -- and at HC4 a human is answering one question:
+    promote or not. That answer is these five lines; everything else is why.
+    """
+    conclusion = payload.get("conclusion") or {}
+    if not conclusion:
+        return []
+    interpretation = conclusion.get("product_interpretation") or {}
+    rows = [
+        {
+            "": "recommendation",
+            "value": str(conclusion.get("recommendation") or "—"),
+            "detail": "negative result" if conclusion.get("negative_result") else "",
+        },
+        {
+            "": "QA decision",
+            "value": str(payload.get("qa_decision") or conclusion.get("qa_decision") or "—"),
+            "detail": "",
+        },
+        {
+            "": "best model",
+            "value": str(conclusion.get("best_model") or "—"),
+            "detail": "",
+        },
+        {
+            "": "proven causal lift",
+            "value": str(interpretation.get("proven_causal_lift") or "—"),
+            "detail": "",
+        },
+    ]
+    if conclusion.get("open_questions"):
+        rows.append(
+            {
+                "": "open questions",
+                "value": str(len(conclusion["open_questions"])),
+                "detail": "; ".join(str(q) for q in conclusion["open_questions"]),
+            }
+        )
+    return rows
+
+
+def checkpoint_prose(payload: dict) -> list[tuple[str, str]]:
+    """``(heading, text)`` for the parts of a checkpoint that are paragraphs.
+
+    Only the conclusion has any today. Splitting it out is what lets the page
+    show a reviewable argument instead of a JSON blob with the argument
+    escaped inside it.
+    """
+    conclusion = (payload or {}).get("conclusion") or {}
+    if not conclusion:
+        return []
+    sections = [
+        (heading, str(conclusion[key]))
+        for key, heading in _CONCLUSION_PROSE
+        if conclusion.get(key)
+    ]
+    if conclusion.get("experiments_summary"):
+        sections.append(
+            (
+                "experiments carrying evidence",
+                "\n\n".join(str(e) for e in conclusion["experiments_summary"]),
+            )
+        )
+    if conclusion.get("report_markdown"):
+        sections.append(("the report", str(conclusion["report_markdown"])))
+    return sections
+
+
+#: What each rewind target re-enters and what it costs, for an operator
+#: choosing between them. Legality is *not* here -- see `rewind_targets`.
+REWIND_EFFECTS: dict[str, str] = {
+    "backlog": (
+        "Re-propose the hypotheses from the baseline. Returns the budget slots "
+        "of any mid-flight hypothesis; abandoned ones stay abandoned."
+    ),
+    "feature": (
+        "Re-propose the feature/fit shapes against the approved backlog. For an "
+        "approved recipe that cannot execute — columns the split does not carry."
+    ),
+    "qa": (
+        "Re-run QA on the same frozen champion after an evaluation-plumbing "
+        "fix. The model is untouched; only QA's own results are cleared."
+    ),
+}
+
+
+def rewind_targets(campaign_state: dict) -> list[dict[str, Any]]:
+    """Every rewind target, whether it is legal now, and why not when it is not.
+
+    Legality is decided by *calling* ``rewind_update`` and catching its
+    refusal, so what the surface offers can never drift from what the action
+    permits. A rewind form that offers an illegal target is how an operator
+    learns to distrust the whole page.
+    """
+    from amt.graph.human import rewind_update
+
+    rows: list[dict[str, Any]] = []
+    for target, effect in REWIND_EFFECTS.items():
+        try:
+            rewind_update(campaign_state, target, "probe")
+        except ValueError as refusal:
+            rows.append(
+                {"target": target, "allowed": False, "effect": effect, "reason": str(refusal)}
+            )
+        else:
+            rows.append({"target": target, "allowed": True, "effect": effect, "reason": ""})
+    return rows
+
+
 def summary_rows(payload: dict) -> list[dict[str, str]] | None:
     """Checklist rows for the checkpoint in ``payload``, or ``None``.
 
@@ -300,6 +431,8 @@ def summary_rows(payload: dict) -> list[dict[str, str]] | None:
         return shape_rows(payload)
     if checkpoint == "HC_CHAMPION":
         return champion_rows(payload)
+    if checkpoint == "HC4":
+        return conclusion_rows(payload)
     return None
 
 

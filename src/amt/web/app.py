@@ -70,8 +70,8 @@ def create_app(
             )
         return render_template("index.html", campaigns=campaigns)
 
-    @app.get("/c/<campaign_id>")
-    def campaign(campaign_id: str):
+    def render_campaign(campaign_id: str, rewind_error: str = "", status: int = 200):
+        """The campaign page. One renderer, so an error path shows the same page."""
         graph = graph_for(campaign_id)
         state = monitor.state(graph, campaign_id)
         if not state:
@@ -84,9 +84,11 @@ def create_app(
             summary=describe(state),
             pending=pending,
             checklist=monitor.summary_rows(pending) if pending else None,
-            document=monitor.clip(_json(monitor.checkpoint_document(pending)))
-            if pending
-            else ("", False),
+            # Full, not clipped. `PREVIEW_CHARS` exists for a terminal panel;
+            # a browser has a scrollbar, and a truncated contract is one a
+            # reviewer cannot check.
+            document=_json(monitor.checkpoint_document(pending)) if pending else "",
+            prose=monitor.checkpoint_prose(pending) if pending else [],
             hypotheses=[h.model_dump(mode="json") for h in state.get("hypotheses") or []],
             history=[h.model_dump(mode="json") for h in state.get("experiment_history") or []],
             events=list(reversed(runner.events)),
@@ -94,7 +96,61 @@ def create_app(
             error=runner.error,
             report=state.get("experimentation_report"),
             report_rows=monitor.report_rows(state.get("experimentation_report")),
-        )
+            rewinds=monitor.rewind_targets(state),
+            rewind_error=rewind_error,
+        ), status
+
+    @app.get("/c/<campaign_id>")
+    def campaign(campaign_id: str):
+        return render_campaign(campaign_id)
+
+    @app.get("/c/<campaign_id>/document")
+    def document(campaign_id: str):
+        """The pending checkpoint's document, whole, as plain text.
+
+        The campaign page scrolls it inline; this is for reading it in a
+        separate tab, searching it, or piping it somewhere. Never clipped.
+        """
+        graph = graph_for(campaign_id)
+        pending = monitor.pending_interrupt(graph, campaign_id)
+        if not pending:
+            return render_template("missing.html", campaign_id=campaign_id), 404
+        body = _json(monitor.checkpoint_document(pending))
+        return body, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+    @app.post("/c/<campaign_id>/rewind")
+    def rewind(campaign_id: str):
+        """Reopen an approved gate and re-run from it.
+
+        The same `rewind_update` + `update_state` the CLI's `amt rewind` uses,
+        so the two surfaces cannot disagree about what a rewind means.
+        """
+        from amt.graph.human import rewind_update
+
+        graph = graph_for(campaign_id)
+        state = monitor.state(graph, campaign_id)
+        if not state:
+            return render_template("missing.html", campaign_id=campaign_id), 404
+        target = (request.form.get("to") or "").strip()
+        reason = (request.form.get("reason") or "").strip()
+        if not reason:
+            # The reason is not paperwork: it is the feedback the planner
+            # redrafts from, so a blank one wastes the whole round trip.
+            return render_campaign(
+                campaign_id,
+                "a rewind needs a reason — the planner redrafts from it",
+                status=400,
+            )
+        try:
+            as_node, values = rewind_update(state, target, reason)
+        except ValueError as exc:
+            return render_campaign(campaign_id, str(exc), status=400)
+        try:
+            graph.update_state(monitor.config_for(campaign_id), values, as_node=as_node)
+            runners.resume(campaign_id, None)
+        except RunnerBusy as exc:
+            return render_template("busy.html", campaign_id=campaign_id, detail=str(exc)), 409
+        return redirect(url_for("campaign", campaign_id=campaign_id))
 
     @app.post("/c/<campaign_id>/decide")
     def decide(campaign_id: str):

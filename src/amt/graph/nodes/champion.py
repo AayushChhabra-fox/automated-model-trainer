@@ -199,22 +199,33 @@ def _comparison(state: CampaignState, champions: list, contract) -> list[dict]:
     rows: list[dict] = []
     baseline = state.get("baseline_metrics") or {}
     if baseline:
-        rows.append({"label": "baseline", "metrics": dict(baseline)})
+        rows.append({"label": "baseline", "metrics": _bare(baseline)})
     for champion in champions:
-        rows.append(
-            {
-                "label": champion.hypothesis_id,
-                "metrics": {
-                    primary: champion.primary_metric_value,
-                    **{
-                        name: value
-                        for name, value in (champion.secondary_metrics or {}).items()
-                        if name != primary
-                    },
-                },
-            }
-        )
+        # The primary arrives bare and the secondaries arrive `val/`-prefixed,
+        # so without normalising, the baseline and the champion never land on
+        # the same key and the gate showed no delta at all.
+        metrics = {primary: champion.primary_metric_value} if primary else {}
+        for name, value in _bare(champion.secondary_metrics or {}).items():
+            metrics.setdefault(name, value)
+        rows.append({"label": champion.hypothesis_id, "metrics": metrics})
     return rows
+
+
+def _bare(metrics: dict) -> dict:
+    """Metric names without the split prefix ``train.py`` logs them under.
+
+    An explicit bare key wins over a prefixed one, because it is the value the
+    orchestrator resolved rather than the one MLflow happened to name.
+    """
+    out: dict = {}
+    for name, value in metrics.items():
+        for prefix in ("val/", "validation/"):
+            if name.startswith(prefix):
+                out.setdefault(name[len(prefix) :], value)
+                break
+        else:
+            out[name] = value
+    return out
 
 
 def make_freeze_champion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
