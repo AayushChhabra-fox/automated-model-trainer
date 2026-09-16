@@ -14,6 +14,7 @@ from amt.schemas.evaluation_contract import (
     AcceptanceCriteria,
     DatasetDefinition,
     EvaluationContract,
+    ProductMetricSource,
     RelevanceWeighting,
     SplitPolicy,
 )
@@ -64,6 +65,7 @@ class EvaluationContractDraft(AmtModel):
     # quietly changed either would be scoring a different question.
     evaluation_mode: EvaluationMode = "next_item"
     relevance_weighting: RelevanceWeighting = "none"
+    product_metric_source: ProductMetricSource | None = None
     acceptance_criteria: AcceptanceCriteria
 
 
@@ -117,6 +119,7 @@ def draft_to_contract(
         primary_metric=draft.primary_metric,
         evaluation_mode=draft.evaluation_mode,
         relevance_weighting=draft.relevance_weighting,
+        product_metric_source=draft.product_metric_source,
         harness_version=harness_version,
         acceptance_criteria=criteria,
     )

@@ -164,7 +164,10 @@ def recall_at_k(
     Self-normalised: the recovered gain over the total available gain, so a
     weighted recall is still a fraction and reduces to ``hits / |truth|``.
     """
-    hits = _as_hits(ranked, truth, k, gains)
+    return _recall(_as_hits(ranked, truth, k, gains))
+
+
+def _recall(hits: _Hits) -> np.ndarray:
     denom = np.where(hits.valid, hits.total, 1.0)
     return _masked(hits.matrix.sum(axis=1) / denom, hits.valid)
 
@@ -181,7 +184,10 @@ def hitrate_at_k(
     the conversion that happened at slot 3 counts fully, and finding only the
     easy slot-0 one when a slot-3 one existed does not.
     """
-    hits = _as_hits(ranked, truth, k, gains)
+    return _hitrate(_as_hits(ranked, truth, k, gains))
+
+
+def _hitrate(hits: _Hits) -> np.ndarray:
     denom = np.where(hits.valid, hits.best, 1.0)
     return _masked(hits.matrix.max(axis=1) / denom, hits.valid)
 
@@ -193,7 +199,10 @@ def ndcg_at_k(
     gains: Sequence[Mapping[Any, float]] | None = None,
 ) -> np.ndarray:
     """NDCG@k against the ideal ordering of whatever gains the unit carries."""
-    hits = _as_hits(ranked, truth, k, gains)
+    return _ndcg(_as_hits(ranked, truth, k, gains), k)
+
+
+def _ndcg(hits: _Hits, k: int) -> np.ndarray:
     dcg = (hits.matrix * _discount(k)).sum(axis=1)
     idcg = np.where(hits.ideal > 0, hits.ideal, 1.0)
     return _masked(dcg / idcg, hits.valid)
@@ -212,7 +221,10 @@ def mrr(
     """
     if k is None:
         k = max((len(r) for r in ranked), default=1) or 1
-    hits = _as_hits(ranked, truth, k, gains)
+    return _mrr(_as_hits(ranked, truth, k, gains), k)
+
+
+def _mrr(hits: _Hits, k: int) -> np.ndarray:
     ranks = np.arange(1, k + 1, dtype=np.float64)
     rr = np.zeros(hits.matrix.shape[0], dtype=np.float64)
     any_hit = hits.matrix.sum(axis=1) > 0
@@ -261,13 +273,19 @@ def per_user_metrics(
     These arrays are the input to :mod:`amt.jobs.eval.paired` and
     :mod:`amt.jobs.eval.cohorts`, so paired comparisons and cohort
     breakdowns use exactly the same math as the headline numbers.
+
+    The hit matrix is built once per ``k`` and shared by the four metrics that
+    read it. Calling the four public functions instead would scan the ranked
+    lists four times, which at the half a million renders a real container
+    produces is four times a minute of Python rather than four times nothing.
     """
     out: dict[str, np.ndarray] = {}
     for k in ks:
-        out[f"recall@{k}"] = recall_at_k(ranked, truth, k, gains)
-        out[f"ndcg@{k}"] = ndcg_at_k(ranked, truth, k, gains)
-        out[f"hitrate@{k}"] = hitrate_at_k(ranked, truth, k, gains)
-        out[f"mrr@{k}"] = mrr(ranked, truth, k, gains)
+        hits = _as_hits(ranked, truth, k, gains)
+        out[f"recall@{k}"] = _recall(hits)
+        out[f"ndcg@{k}"] = _ndcg(hits, k)
+        out[f"hitrate@{k}"] = _hitrate(hits)
+        out[f"mrr@{k}"] = _mrr(hits, k)
     return out
 
 

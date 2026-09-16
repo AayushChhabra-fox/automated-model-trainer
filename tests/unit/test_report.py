@@ -90,6 +90,85 @@ def test_a_top_pick_that_did_not_convert_earns_nothing():
     assert top_slot_conversions([["x", "y"]], [{"y"}], [{"y": 5.0}])["per_1k"] == 0.0
 
 
+def test_the_bootstrap_is_memory_bounded_at_a_real_containers_scale(monkeypatch):
+    """A single (2000, 500k) index array is 8 GB, which is how a QA job dies.
+
+    The chunked draw is asserted to allocate no more than the chunk budget per
+    call, and the seeded result must not depend on the chunking.
+    """
+    import numpy as np
+
+    from amt.jobs.eval import paired
+
+    sizes: list[int] = []
+
+    class _Spy:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def integers(self, low, high=None, size=None, **kwargs):
+            if isinstance(size, tuple):
+                sizes.append(size[0] * size[1])
+            return self._inner.integers(low, high, size=size, **kwargs)
+
+    real_default_rng = np.random.default_rng
+    monkeypatch.setattr(paired.np.random, "default_rng", lambda seed: _Spy(real_default_rng(seed)))
+    values = np.linspace(0.0, 1.0, 200_000)
+
+    means = paired._bootstrap_means(values, n_boot=2000, seed=7)
+
+    assert means.size == 2000
+    assert sizes, "the resample was drawn at all"
+    assert max(sizes) <= paired._BOOTSTRAP_CHUNK_ROWS
+    assert len(sizes) > 1, "200k x 2000 must not be drawn in one allocation"
+
+
+def test_chunking_does_not_change_the_interval(monkeypatch):
+    """Same seed, same numbers, whatever the chunk size."""
+    import numpy as np
+
+    from amt.jobs.eval import paired
+
+    values = np.linspace(-1.0, 1.0, 5_000)
+    monkeypatch.setattr(paired, "_BOOTSTRAP_CHUNK_ROWS", 10_000_000)
+    whole = paired._bootstrap_means(values, n_boot=500, seed=11)
+    monkeypatch.setattr(paired, "_BOOTSTRAP_CHUNK_ROWS", 50_000)
+    chunked = paired._bootstrap_means(values, n_boot=500, seed=11)
+
+    assert np.array_equal(whole, chunked)
+
+
+def test_the_four_metrics_agree_whether_computed_together_or_apart():
+    """`per_user_metrics` shares one hit matrix; it must change no number."""
+    import numpy as np
+
+    from amt.jobs.eval.harness import (
+        hitrate_at_k,
+        mrr,
+        ndcg_at_k,
+        per_user_metrics,
+        recall_at_k,
+    )
+
+    ranked = [["a", "b", "c"], ["c", "a", "b"], ["x", "y", "z"], ["b", "c", "a"]]
+    truth = [{"b", "c"}, {"c"}, set(), {"a"}]
+    gains = [{"b": 8.0, "c": 1.0}, {"c": 3.0}, {}, {"a": 1.0}]
+
+    shared = per_user_metrics(ranked, truth, ks=(1, 3), gains=gains)
+
+    for k in (1, 3):
+        assert np.array_equal(
+            shared[f"recall@{k}"], recall_at_k(ranked, truth, k, gains), equal_nan=True
+        )
+        assert np.array_equal(
+            shared[f"ndcg@{k}"], ndcg_at_k(ranked, truth, k, gains), equal_nan=True
+        )
+        assert np.array_equal(
+            shared[f"hitrate@{k}"], hitrate_at_k(ranked, truth, k, gains), equal_nan=True
+        )
+        assert np.array_equal(shared[f"mrr@{k}"], mrr(ranked, truth, k, gains), equal_nan=True)
+
+
 def test_the_product_unit_carries_a_confidence_interval():
     ranked = [["a"], ["b"], ["c"], ["d"], ["e"], ["f"]]
     truth = [{"a"}, set(), {"c"}, set(), {"e"}, set()]

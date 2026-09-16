@@ -130,6 +130,11 @@ class SplitRef(AmtModel):
     delta_version: int = Field(description="Delta version read with `VERSION AS OF`.")
     row_count: int = Field(ge=0)
     membership_hash: str = Field(description="Hash of the sorted membership keys.")
+    # How many of those rows carry a positive label, in the modes that have
+    # one. Part of a split's identity as ground truth, and the number a human
+    # can sanity-check at HC3: a grouped split with no positives is shaped
+    # perfectly and useless, and nothing downstream can tell.
+    positive_labels: int = Field(default=0, ge=0)
     description: str = ""
     temporal_range: tuple[str, str] | None = None
 

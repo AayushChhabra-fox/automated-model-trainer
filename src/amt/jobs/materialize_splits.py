@@ -158,8 +158,9 @@ def plan_from_contract(contract: Mapping[str, Any]) -> SplitPlan:
             if v
         }
     )
-    # `grouped_rerank`: the render key, the incumbent's slot and the label.
-    label = dict(contract.get("label_spec") or {})
+    # `grouped_rerank`: the render key, the incumbent's slot and the label. All
+    # three live on `dataset` beside source_table/columns/filters, because all
+    # three are executed verbatim and all three are ground truth.
     kwargs.update(
         {
             k: v
@@ -169,8 +170,8 @@ def plan_from_contract(contract: Mapping[str, Any]) -> SplitPlan:
                 ("propensity_floor", contract.get("propensity_floor")),
                 ("group_key", dataset.get("group_key")),
                 ("position_column", dataset.get("position_column")),
-                ("label_column", label.get("source_column")),
-                ("positive_values", label.get("positive_values")),
+                ("label_column", dataset.get("label_column")),
+                ("positive_values", dataset.get("label_positive_values")),
                 ("cohort_columns", contract.get("cohort_columns")),
             )
             if v
@@ -182,12 +183,38 @@ def plan_from_contract(contract: Mapping[str, Any]) -> SplitPlan:
     plan.filters = list(plan.filters or [])
     if not plan.source_table and not plan.source_path:
         raise ValueError("the contract names no dataset.source_table, so there is nothing to split")
-    if plan.grouped and not (plan.group_key and plan.position_column):
-        raise ValueError(
-            "evaluation_mode 'grouped_rerank' needs dataset.group_key and "
-            "dataset.position_column: one render is one evaluation unit"
-        )
+    if plan.grouped:
+        missing = [
+            name
+            for name, value in (
+                ("dataset.group_key", plan.group_key),
+                ("dataset.position_column", plan.position_column),
+                ("dataset.label_column", plan.label_column),
+            )
+            if not value
+        ]
+        if missing:
+            # Without the label column every row's label resolves to FALSE, the
+            # propensities all collapse to 1.0, and the job returns three
+            # perfectly-shaped useless splits. Refusing costs ten seconds;
+            # discovering it costs a campaign.
+            raise ValueError(
+                f"evaluation_mode 'grouped_rerank' needs {missing} on the contract's "
+                "dataset: one render is one evaluation unit, the incumbent's slot is "
+                "the baseline's ranking, and the label is what both are judged on"
+            )
     return plan
+
+
+class EmptyLabels(ValueError):
+    """A grouped split materialized with no positive labels at all.
+
+    Almost always a label column that does not mean what the contract thinks,
+    and it is indistinguishable downstream from a rail nobody converts on: the
+    propensities collapse to 1.0, the weighting silently becomes none, and
+    every metric is computed against an empty truth set. Loud here is the only
+    place it can be loud.
+    """
 
 
 # --------------------------------------------------------------------------
@@ -432,7 +459,7 @@ def _grouped_rows(df, plan: SplitPlan, propensities: Mapping[str, float] | None)
     import pandas as pd
 
     keys = list(plan.group_key)
-    positive = {str(v) for v in (plan.positive_values or [])}
+    positive = {str(v).lower() for v in (plan.positive_values or [])}
     rows: list[dict[str, Any]] = []
 
     for key, group in df.groupby(keys, sort=True, dropna=False):
@@ -447,7 +474,7 @@ def _grouped_rows(df, plan: SplitPlan, propensities: Mapping[str, float] | None)
             continue
 
         labels = [
-            1.0 if (str(v) in positive if positive else bool(v)) else 0.0
+            1.0 if (str(v).lower() in positive if positive else bool(v)) else 0.0
             for v in (
                 ordered[plan.label_column]
                 if plan.label_column in ordered.columns
@@ -516,13 +543,15 @@ def _grouped_local(df, plan: SplitPlan):
 
     propensities: dict[str, float] | None = None
     if plan.relevance_weighting == "pbm":
-        positive = {str(v) for v in (plan.positive_values or [])}
+        positive = {str(v).lower() for v in (plan.positive_values or [])}
         train = windows["train"]
         propensities = estimate_propensities(
             [
                 {
                     "slot": parse_position(slot),
-                    "label": (str(label) in positive if positive else bool(label)),
+                    "label": (
+                        str(label).lower() in positive if positive else bool(label)
+                    ),
                     plan.propensity_by: segment,
                 }
                 for slot, label, segment in zip(
@@ -690,13 +719,22 @@ def _slot_expr(plan: SplitPlan) -> str:
 
 
 def _label_expr(plan: SplitPlan) -> str:
+    """Whether a row counts as a conversion, as SQL.
+
+    Compared case-insensitively as text, which matters more than it looks:
+    Python renders ``True`` as ``"True"`` and Spark renders a boolean column as
+    ``"true"``, so a plain string comparison against ``positive_values=[True]``
+    matches nothing at all -- while the pandas path, where both sides are
+    Python, matches fine. That divergence is invisible in every local test and
+    turns the whole label column into ``FALSE`` on a cluster.
+    """
     column = plan.label_column
     if not column:
         return "FALSE"
     if not plan.positive_values:
         return f"coalesce(cast({column} AS BOOLEAN), FALSE)"
-    values = ", ".join(_lit(str(v)) for v in plan.positive_values)
-    return f"(cast({column} AS string) IN ({values}))"
+    values = ", ".join(_lit(str(v).lower()) for v in plan.positive_values)
+    return f"(lower(cast({column} AS string)) IN ({values}))"
 
 
 def _grouped_base_cte(plan: SplitPlan) -> str:
@@ -834,6 +872,14 @@ def _materialize_spark(
     if plan.grouped:
         if plan.relevance_weighting == "pbm":
             propensities = _estimate_propensities_spark(plan, spark)
+            if propensities and all(theta >= 1.0 for theta in propensities.values()):
+                raise EmptyLabels(
+                    f"every position propensity came out at 1.0 from "
+                    f"{plan.label_column!r} on the train window: the estimator saw no "
+                    "conversions, so the pbm weighting would silently be no weighting. "
+                    "Check that the label column and its positive values are the ones "
+                    "this source actually uses."
+                )
         queries = _grouped_sql(plan, propensities)
         identity = "group_id"
     elif plan.strategy == "leave_last_n":
@@ -876,6 +922,20 @@ def _materialize_spark(
             "row_count": row_count,
             "membership_hash": digest,
         }
+        if plan.grouped:
+            positives = int(
+                spark.sql(
+                    "SELECT count(*) AS c FROM "
+                    f"(SELECT explode(labels) AS l FROM {table}) WHERE l > 0"
+                ).collect()[0][0]
+            )
+            refs[name]["positive_labels"] = positives
+            if row_count and not positives:
+                raise EmptyLabels(
+                    f"{table} has {row_count:,} renders and not one positive label from "
+                    f"{plan.label_column!r}. Every metric would be computed against an "
+                    "empty truth set."
+                )
     return _result(contract, plan, refs, backend="spark", propensities=propensities)
 
 

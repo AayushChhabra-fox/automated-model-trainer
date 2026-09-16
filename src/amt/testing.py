@@ -256,6 +256,8 @@ class CannedResponder:
                 source_tables=[self.table],
                 group_key=GROUP_KEY if self.grouped else [],
                 position_column="item_index" if self.grouped else "",
+                label_column="conversion_flag" if self.grouped else "",
+                label_positive_values=[True] if self.grouped else [],
                 filters=["event_type = 'start'"],
                 min_interactions_per_user=3,
                 snapshot_id="snap-2026-08-01",

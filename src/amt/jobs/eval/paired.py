@@ -75,9 +75,7 @@ def paired_bootstrap(
         }
 
     mean = float(deltas.mean())
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, n, size=(int(n_boot), n))
-    boot_means = deltas[idx].mean(axis=1)
+    boot_means = _bootstrap_means(deltas, n_boot, seed)
     lo = float(np.percentile(boot_means, 100.0 * (alpha / 2.0)))
     hi = float(np.percentile(boot_means, 100.0 * (1.0 - alpha / 2.0)))
 
@@ -88,6 +86,31 @@ def paired_bootstrap(
         "frac_improved": float(np.mean(deltas > 0)),
         "n_users": int(n),
     }
+
+
+#: Resample indices are drawn in chunks of this many rows. A single
+#: ``(n_boot, n)`` index array is 2000 x n int64: at the 500 000 QA renders a
+#: real container produces that is 8 GB, which is how a QA job dies after the
+#: campaign has already spent its entire compute budget. Chunking keeps the
+#: peak at a few hundred MB and changes no result: the same seed draws the same
+#: numbers in the same order either way.
+_BOOTSTRAP_CHUNK_ROWS = 20_000_000
+
+
+def _bootstrap_means(values: np.ndarray, n_boot: int, seed: int) -> np.ndarray:
+    """Means of ``n_boot`` bootstrap resamples of ``values``, memory-bounded."""
+    n = values.size
+    n_boot = int(n_boot)
+    rng = np.random.default_rng(seed)
+    per_chunk = max(1, _BOOTSTRAP_CHUNK_ROWS // max(n, 1))
+    means = np.empty(n_boot, dtype=np.float64)
+    done = 0
+    while done < n_boot:
+        rows = min(per_chunk, n_boot - done)
+        idx = rng.integers(0, n, size=(rows, n))
+        means[done : done + rows] = values[idx].mean(axis=1)
+        done += rows
+    return means
 
 
 def paired_comparison(
@@ -179,9 +202,7 @@ def top_slot_conversions(
     if credits.size == 0:
         return {"per_1k": 0.0, "ci_low": 0.0, "ci_high": 0.0, "n_renders": 0}
 
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, credits.size, size=(int(n_boot), credits.size))
-    boot = credits[idx].mean(axis=1) * per
+    boot = _bootstrap_means(credits, n_boot, seed) * per
     return {
         "per_1k": float(credits.mean() * per),
         "ci_low": float(np.percentile(boot, 100.0 * (alpha / 2.0))),

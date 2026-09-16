@@ -16,6 +16,7 @@ import pytest
 from amt.jobs.data.features import build_eval_frame
 from amt.jobs.eval.harness import binary_metrics, evaluate, ndcg_at_k
 from amt.jobs.materialize_splits import (
+    SplitPlan,
     estimate_propensities,
     materialize,
     parse_position,
@@ -59,16 +60,30 @@ IMPRESSIONS = pd.DataFrame(
     ],
 )
 
+#: A placeholder split reference: materialization fills in the real one.
+_SPLIT = {
+    "name": "train",
+    "table": "",
+    "delta_version": 0,
+    "row_count": 0,
+    "membership_hash": "",
+}
+
 CONTRACT = {
     "contract_hash": "h",
     "evaluation_mode": "grouped_rerank",
-    "label_spec": {"source_column": "conversion_flag", "positive_values": [True]},
     "cohort_columns": ["client_name"],
     "dataset": {
         "source_table": "cat.sch.impressions",
         "columns": {"user": "session_id", "item": "item_id", "timestamp": "ts"},
         "group_key": ["session_id", "page_id", "parent_id"],
         "position_column": "item_index",
+        # The label lives on `dataset` beside the other executed fields. It was
+        # briefly read from a `label_spec` block the contract does not have,
+        # which made every label FALSE and every propensity 1.0 -- shaped
+        # perfectly and completely useless.
+        "label_column": "conversion_flag",
+        "label_positive_values": [True],
         "snapshot_id": "s",
         "dataset_version": "0",
     },
@@ -255,6 +270,82 @@ def test_weights_are_written_next_to_the_labels(tmp_path):
 def test_no_weighting_means_no_weights_column(tmp_path):
     _materialize(tmp_path)
     assert "weights" not in _split(tmp_path, "split_train").columns
+
+
+def test_the_generated_sql_matches_a_boolean_positive_value_case_insensitively():
+    """Python writes `True`; Spark reads `true`. The mismatch cost two cluster runs.
+
+    The pandas path compares Python to Python and matched fine, so every local
+    test passed while the SQL matched nothing -- which turned the entire label
+    column into FALSE on a cluster and collapsed every propensity to 1.0.
+    """
+    from amt.jobs.materialize_splits import _label_expr
+
+    plan = SplitPlan(label_column="conversion_flag", positive_values=[True])
+
+    expression = _label_expr(plan)
+
+    assert expression == "(lower(cast(conversion_flag AS string)) IN ('true'))"
+    assert "'True'" not in expression
+
+
+def test_the_two_backends_agree_on_what_counts_as_a_conversion(tmp_path):
+    """The pandas path is this module's reference semantics, so it has to."""
+    _materialize(tmp_path)
+    train = _split(tmp_path, "split_train")
+
+    positives = sum(sum(1 for x in row if x > 0) for row in train["labels"])
+
+    # Three train renders, one conversion each (s1 slot 0, s2 slot 1, s3 slot 0).
+    assert positives == 3
+
+
+def test_a_grouped_contract_without_a_label_column_is_refused(tmp_path):
+    """The failure this prevents shipped once: FALSE labels, theta all 1.0.
+
+    Every row's label resolved to FALSE, so the propensities collapsed to 1.0,
+    the pbm weighting silently became no weighting, and three perfectly-shaped
+    useless splits came back after eleven minutes of cluster time.
+    """
+    from amt.jobs.materialize_splits import plan_from_contract
+
+    contract = {**CONTRACT, "dataset": {**CONTRACT["dataset"]}}
+    contract["dataset"].pop("label_column")
+
+    with pytest.raises(ValueError, match=r"dataset\.label_column"):
+        plan_from_contract(contract)
+
+
+def test_the_contract_schema_refuses_it_too():
+    """Caught at HC3 as well as in the job, because HC3 is cheaper."""
+    from pydantic import ValidationError
+
+    from amt.schemas.evaluation_contract import EvaluationContract
+
+    with pytest.raises(ValidationError, match="label_column"):
+        EvaluationContract.model_validate(
+            {
+                "spec_hash": "s",
+                "evaluation_mode": "grouped_rerank",
+                "dataset": {
+                    "source_table": "cat.sch.t",
+                    "group_key": ["a"],
+                    "position_column": "p",
+                    "snapshot_id": "s",
+                    "dataset_version": "1",
+                },
+                "train_split": _SPLIT,
+                "validation_split": _SPLIT,
+                "qa_split": _SPLIT,
+                "split_policy": {
+                    "strategy": "temporal",
+                    "train_end": "2026-01-01",
+                    "validation_end": "2026-01-08",
+                },
+                "primary_metric": "ndcg@4",
+                "acceptance_criteria": {"primary_metric": "ndcg@4"},
+            }
+        )
 
 
 # --- what the weighting does to a score ----------------------------------

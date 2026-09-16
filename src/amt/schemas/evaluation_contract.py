@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -103,14 +103,24 @@ class DatasetDefinition(AmtModel):
     source_tables: list[str] = Field(
         default_factory=list, description="Every upstream table the dataset derives from."
     )
-    # `grouped_rerank` only: what makes one render one evaluation unit, and
-    # where the incumbent's order is recorded.
+    # `grouped_rerank` only: what makes one render one evaluation unit, where
+    # the incumbent's order is recorded, and which column carries the outcome.
     group_key: list[str] = Field(
         default_factory=list,
         description="Columns that together identify one render. Executed verbatim.",
     )
     position_column: str = Field(
         default="", description="Column holding the incumbent's slot for the row."
+    )
+    # The label is ground truth, so it is frozen here at HC3 rather than in the
+    # FeatureRecipe a Planner writes: `LabelSpec` decides what a *model* trains
+    # on, and it must not be able to redefine what counts as a conversion.
+    label_column: str = Field(
+        default="", description="Boolean/flag column marking a converted impression."
+    )
+    label_positive_values: list[Any] = Field(
+        default_factory=list,
+        description="Values of label_column counted as positive; empty means truthiness.",
     )
     snapshot_id: str = Field(description="Immutable snapshot identifier.")
     dataset_version: str = Field(description="Delta version / materialization id.")
@@ -315,13 +325,15 @@ class EvaluationContract(AmtModel):
             for name, value in (
                 ("dataset.group_key", self.dataset.group_key),
                 ("dataset.position_column", self.dataset.position_column),
+                ("dataset.label_column", self.dataset.label_column),
             )
             if not value
         ]
         if missing:
             raise ValueError(
                 f"evaluation_mode 'grouped_rerank' requires {missing}: one render is "
-                "one evaluation unit, and the incumbent's order is the baseline"
+                "one evaluation unit, the incumbent's order is the baseline, and the "
+                "label is what either of them is judged on"
             )
         return self
 

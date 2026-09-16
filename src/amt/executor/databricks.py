@@ -566,8 +566,11 @@ def _to_split_materialization(payload: Mapping[str, Any], contract: Any) -> Any:
     from amt.schemas.evaluation_contract import SplitMaterialization
 
     splits = payload.get("splits") or {}
+    # `_keep` on the nested refs too, not just the outer model: the job side
+    # evolves independently, and a diagnostic it starts reporting must not be
+    # able to fail the orchestrator's read of an otherwise-successful run.
     refs = {
-        name: SplitRef.model_validate({"name": name, **dict(ref)})
+        name: SplitRef.model_validate(_keep(SplitRef, {"name": name, **dict(ref)}))
         for name, ref in splits.items()
     }
     mapped = {
@@ -580,6 +583,13 @@ def _to_split_materialization(payload: Mapping[str, Any], contract: Any) -> Any:
         "train": refs.get("train"),
         "validation": refs.get("validation"),
         "qa": refs.get("qa"),
+        # The position-bias propensities the job estimated on the train split.
+        # Part of the frozen ground truth: QA must weight with the same numbers
+        # the candidates were trained and validated against, and the report
+        # prints them so the correction is auditable.
+        "propensities": {
+            str(k): float(v) for k, v in (payload.get("propensities") or {}).items()
+        },
         "job_run_id": payload.get("job_run_id"),
     }
     return SplitMaterialization.model_validate(_keep(SplitMaterialization, mapped))
