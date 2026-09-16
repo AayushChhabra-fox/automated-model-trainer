@@ -98,6 +98,15 @@ def test_the_cli_comma_form_and_the_list_form_mean_the_same_thing():
     assert parse_resume({"approved": True}).keep == []
 
 
+def test_typing_what_the_form_placeholder_shows_is_not_a_typo():
+    # The web form's placeholders read "keep H1,H3" / "drop H2"; an operator who
+    # types exactly that must not be told H1 does not exist.
+    decision = parse_resume({"approved": True, "keep": "keep H1,H2,H4", "drop": "drop H3"})
+    assert decision.keep == ["H1", "H2", "H4"]
+    assert decision.drop == ["H3"]
+    assert parse_resume({"approved": True, "keep": "H1 H3; H4"}).keep == ["H1", "H3", "H4"]
+
+
 # --- the clamp ------------------------------------------------------------
 
 

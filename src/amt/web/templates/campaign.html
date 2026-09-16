@@ -35,8 +35,8 @@
     <form class="verbs" method="post" action="{{ url_for('decide', campaign_id=campaign_id) }}">
       <button class="primary" name="verb" value="approve">approve</button>
       {% if pending.checkpoint in ("HC_BACKLOG", "HC_FEATURE", "HC_CHAMPION") %}
-        <input type="text" name="keep" placeholder="keep H1,H3">
-        <input type="text" name="drop" placeholder="drop H2">
+        <label>keep <input type="text" name="keep" placeholder="H1,H3 (in run order)" title="Comma-separated ids to keep; anything else under review is dropped. Order sets run order."></label>
+        <label>drop <input type="text" name="drop" placeholder="H2" title="Comma-separated ids to abandon."></label>
       {% endif %}
       {% if pending.checkpoint == "HC_CHAMPION" %}
         <button name="verb" value="freeze">freeze — stop exploring, go to QA</button>

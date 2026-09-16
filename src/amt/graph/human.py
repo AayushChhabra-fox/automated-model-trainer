@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -33,12 +34,22 @@ class HumanDecision(AmtModel):
     )
 
 
+_ID_SEPARATORS = re.compile(r"[,\s;]+")
+_VERB_PREFIX = re.compile(r"^(keep|drop|freeze)\b[:\s]*", re.IGNORECASE)
+
+
 def _ids(value: Any) -> list[str]:
-    """Accept a list, or the comma-separated form a CLI flag produces."""
+    """Accept a list, or the free text a CLI flag or a form field produces.
+
+    ``"H1,H3"``, ``"H1, H3"``, ``"H1 H3"`` and ``"keep H1,H3"`` all yield
+    ``["H1", "H3"]`` — an operator typing exactly what a placeholder shows must
+    not be told the hypothesis does not exist.
+    """
     if value is None:
         return []
     if isinstance(value, str):
-        return [part.strip() for part in value.split(",") if part.strip()]
+        text = _VERB_PREFIX.sub("", value.strip())
+        return [part for part in _ID_SEPARATORS.split(text) if part]
     return [str(part).strip() for part in value if str(part).strip()]
 
 
