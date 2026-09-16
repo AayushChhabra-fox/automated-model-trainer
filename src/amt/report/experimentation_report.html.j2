@@ -1,0 +1,216 @@
+{#
+  The decision-ready read of one campaign. Deliberately plain: no JS, no CDN,
+  no chart library, so it renders identically as an MLflow artifact, an
+  attachment and a page in the local web surface.
+
+  Order is an argument. The proxy-sanity verdict comes before any candidate
+  number, because if the offline metric does not track the product metric the
+  rest of the page is not evidence of anything.
+#}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ report.campaign_id }} — experimentation report</title>
+<style>
+  body { font: 15px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif;
+         max-width: 54rem; margin: 2.5rem auto; padding: 0 1.25rem; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.05rem; margin: 2rem 0 .6rem; text-transform: uppercase;
+       letter-spacing: .06em; color: #555; border-bottom: 1px solid #e3e3e3;
+       padding-bottom: .3rem; }
+  .sub { color: #666; margin-top: 0; }
+  table { border-collapse: collapse; width: 100%; margin: .5rem 0 1rem; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #ededed; }
+  th { font-weight: 600; color: #444; font-size: .85rem; text-transform: uppercase;
+       letter-spacing: .04em; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .banner { padding: .8rem 1rem; border-radius: 4px; margin: 1rem 0; }
+  .pass { background: #eef7ee; border-left: 4px solid #3c8f3c; }
+  .fail { background: #fdeeee; border-left: 4px solid #b03030; }
+  .warn { background: #fdf6e3; border-left: 4px solid #b08a30; }
+  .headline { font-size: 1.8rem; font-variant-numeric: tabular-nums; }
+  .muted { color: #777; font-size: .9rem; }
+  ul.assumptions li { margin-bottom: .4rem; }
+  code { background: #f4f4f4; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
+</style>
+</head>
+<body>
+
+<h1>{{ report.campaign_id or "campaign" }}</h1>
+<p class="sub">
+  {{ report.evaluation_mode }} evaluation
+  {%- if report.relevance_weighting != "none" %}, {{ report.relevance_weighting }}-weighted{% endif %}
+  · primary metric <code>{{ report.primary_metric }}</code>
+  · contract <code>{{ report.contract_hash[:12] }}</code>
+  {%- if report.qa_decision %} · QA <strong>{{ report.qa_decision.value }}</strong>{% endif %}
+</p>
+
+<h2>Is the offline metric measuring the product?</h2>
+{% set proxy = report.proxy_sanity %}
+{% if not proxy.checked %}
+  <div class="banner warn">
+    Not checked: the QA split carries no daily timestamps, so there is no series to
+    correlate. Every number below rests on the offline metric being a good proxy, and
+    that assumption is untested here.
+  </div>
+{% elif proxy.passed %}
+  <div class="banner pass">
+    <strong>Passed.</strong> The incumbent's <code>{{ report.primary_metric }}</code> moves
+    with the product metric across {{ proxy.days }} day{{ "" if proxy.days == 1 else "s" }}
+    (Spearman&nbsp;ρ&nbsp;=&nbsp;{{ "%.3f"|format(proxy.rho or 0) }}, threshold
+    {{ proxy.threshold }}{% if proxy.source == "own_label" %}, against the split's own label
+    rather than an external series{% endif %}).
+  </div>
+{% else %}
+  <div class="banner fail">
+    <strong>Failed.</strong> {{ proxy.reason }}
+    The candidate's numbers below are reported for the record and are
+    <em>not</em> evidence that it improves the product.
+  </div>
+{% endif %}
+{% if proxy.rho_external is not none and proxy.rho_own_label is not none %}
+  <p class="muted">
+    ρ against the product metric's own series: {{ "%.3f"|format(proxy.rho_external) }}.
+    ρ against our label: {{ "%.3f"|format(proxy.rho_own_label) }}. The first is the
+    cross-source test; the second shares our label and is weaker evidence.
+  </p>
+{% endif %}
+
+<h2>The effect, in product units</h2>
+{% set units = report.product_units %}
+<p class="headline">
+  {{ "%+.2f"|format(units.delta) }}
+  <span class="muted">{{ units.unit }}</span>
+</p>
+<table>
+  <tr><th></th><th class="num">per 1,000 renders</th><th class="num">95% CI</th></tr>
+  <tr>
+    <td>candidate</td>
+    <td class="num">{{ "%.2f"|format(units.candidate) }}</td>
+    <td class="num">{{ "%.2f"|format(units.candidate_ci[0]) }} – {{ "%.2f"|format(units.candidate_ci[1]) }}</td>
+  </tr>
+  <tr>
+    <td>incumbent</td>
+    <td class="num">{{ "%.2f"|format(units.baseline) }}</td>
+    <td class="num">{{ "%.2f"|format(units.baseline_ci[0]) }} – {{ "%.2f"|format(units.baseline_ci[1]) }}</td>
+  </tr>
+</table>
+<p class="muted">
+  Over {{ "{:,}".format(units.n_renders) }} renders.
+  {%- if report.relevance_weighting == "pbm" %}
+  The incumbent's figure is its own observed top-slot rate, so it should match what the
+  dashboard reports; the candidate's is the position-corrected counterfactual.
+  {%- endif %}
+</p>
+
+<h2>The offline effect</h2>
+<table>
+  <tr><th>metric</th><th class="num">candidate</th><th class="num">incumbent</th><th class="num">delta</th><th class="num">95% CI</th></tr>
+  <tr>
+    <td><strong>{{ report.primary_metric }}</strong></td>
+    <td class="num">{{ "%.5f"|format(report.candidate_metrics.get(report.primary_metric, 0)) }}</td>
+    <td class="num">{{ "%.5f"|format(report.baseline_metrics.get(report.primary_metric, 0)) }}</td>
+    <td class="num">{{ "%+.5f"|format(report.primary_delta) }}</td>
+    <td class="num">
+      {{ "%+.5f"|format(report.primary_ci[0]) }} – {{ "%+.5f"|format(report.primary_ci[1]) }}
+      {%- if report.primary_significant %} ✓{% endif %}
+    </td>
+  </tr>
+  {% for metric, delta in report.secondary_deltas.items() | sort %}
+  <tr>
+    <td>{{ metric }}</td>
+    <td class="num">{{ "%.5f"|format(report.candidate_metrics.get(metric, 0)) }}</td>
+    <td class="num">{{ "%.5f"|format(report.baseline_metrics.get(metric, 0)) }}</td>
+    <td class="num">{{ "%+.5f"|format(delta) }}</td>
+    <td class="num"></td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="muted">
+  {% if report.primary_significant %}The primary CI excludes zero.{% else %}
+  The primary CI includes zero: this is not a measurable improvement.{% endif %}
+</p>
+
+{% if report.cohort_table %}
+<h2>By cohort</h2>
+<table>
+  <tr><th>cohort</th><th class="num">candidate</th><th class="num">incumbent</th><th class="num">relative</th><th class="num">n</th><th></th></tr>
+  {% for row in report.cohort_table %}
+  <tr>
+    <td>{{ row.name }}</td>
+    <td class="num">{{ "%.5f"|format(row.candidate) }}</td>
+    <td class="num">{{ "%.5f"|format(row.baseline) }}</td>
+    <td class="num">{{ "%+.1f%%"|format(row.relative_delta * 100) }}</td>
+    <td class="num">{{ "{:,}".format(row.n) }}</td>
+    <td>{% if row.regressed %}<strong style="color:#b03030">regressed</strong>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% if report.regressions %}
+  <div class="banner fail">
+    {{ report.regressions | length }} cohort(s) fall past the contract's guardrail:
+    {{ report.regressions | join(", ") }}. An overall win that costs a cohort more than
+    the pre-registered tolerance is not a win.
+  </div>
+{% endif %}
+{% endif %}
+
+{% if report.ab_design.required_renders %}
+<h2>What it would take to prove online</h2>
+<table>
+  <tr><td>incumbent rate</td><td class="num">{{ "%.4f"|format(report.ab_design.baseline_rate) }}</td></tr>
+  <tr><td>candidate rate</td><td class="num">{{ "%.4f"|format(report.ab_design.candidate_rate) }}</td></tr>
+  <tr><td>absolute effect</td><td class="num">{{ "%+.4f"|format(report.ab_design.absolute_effect) }}</td></tr>
+  <tr><td>relative effect</td><td class="num">{{ "%+.1f%%"|format(report.ab_design.relative_effect * 100) }}</td></tr>
+  <tr><td>renders needed ({{ (report.ab_design.power * 100) | int }}% power, α={{ report.ab_design.significance }})</td>
+      <td class="num">{{ "{:,.0f}".format(report.ab_design.required_renders) }}</td></tr>
+  {% if report.ab_design.days_at_current_traffic %}
+  <tr><td>days at this rail's current traffic</td>
+      <td class="num">{{ "%.1f"|format(report.ab_design.days_at_current_traffic) }}</td></tr>
+  {% endif %}
+</table>
+{% endif %}
+
+{% if report.propensities %}
+<h2>Position-bias correction</h2>
+<p class="muted">
+  Examination propensity per client and slot, estimated on the train split only. A
+  conversion at a slot with propensity θ counts <code>1/θ</code>, so the correction is
+  auditable rather than implicit.
+</p>
+<table>
+  <tr><th>client | slot</th><th class="num">θ</th><th class="num">weight</th></tr>
+  {% for key, theta in report.propensities.items() | sort %}
+  <tr>
+    <td><code>{{ key }}</code></td>
+    <td class="num">{{ "%.4f"|format(theta) }}</td>
+    <td class="num">{{ "%.1f"|format(1.0 / theta if theta > 0 else 0) }}×</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if report.operational %}
+<h2>Operational</h2>
+<table>
+  {% for key, value in report.operational.items() | sort %}
+  <tr><td>{{ key }}</td><td class="num">{{ "%.3f"|format(value) }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if report.assumptions %}
+<h2>What this does not say</h2>
+<ul class="assumptions">
+  {% for assumption in report.assumptions %}<li>{{ assumption }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+<p class="muted">
+  Generated {{ report.created_at.strftime("%Y-%m-%d %H:%M UTC") }} by AMT under contract
+  <code>{{ report.contract_hash[:12] }}</code>. Every number here is computed by the QA
+  job; the narrative in <code>conclusion.md</code> is written from them and adds none.
+</p>
+
+</body>
+</html>

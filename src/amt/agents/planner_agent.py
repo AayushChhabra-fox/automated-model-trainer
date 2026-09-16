@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from amt.agents.base import AgentBase
 from amt.schemas.champion import FinalChampionSelection, HypothesisChampion
-from amt.schemas.conclusion import ScientificConclusion
+from amt.schemas.conclusion import ExperimentationReport, ScientificConclusion
 from amt.schemas.evaluation_contract import EvaluationContract
 from amt.schemas.feature_recipe import (
     ApprovedShape,
@@ -159,6 +159,7 @@ class PlannerAgent(AgentBase):
         assessment: QAAssessment | None,
         phase0: Phase0Result | None,
         phase1: Phase1Result | None,
+        report: ExperimentationReport | None = None,
     ) -> ScientificConclusion:
         agent = self.agent("planner.conclusion", "planner_conclusion", ScientificConclusion)
         conclusion = agent.invoke(
@@ -171,6 +172,7 @@ class PlannerAgent(AgentBase):
                 "qa_assessment": assessment,
                 "qa_phase0": phase0,
                 "qa_phase1": phase1,
+                "experimentation_report": report,
             }
         )
         return conclusion.model_copy(

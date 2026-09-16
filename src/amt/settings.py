@@ -182,6 +182,17 @@ class Settings(BaseSettings):
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
+    def reports_dir(self) -> Path:
+        """Where rendered reports land: beside the checkpoint database.
+
+        Derived rather than configured, so a test that isolates the campaign
+        database also isolates its reports, and so the two never disagree
+        about which machine a campaign lives on.
+        """
+        directory = Path(self.checkpoint_db).expanduser().parent / "reports"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

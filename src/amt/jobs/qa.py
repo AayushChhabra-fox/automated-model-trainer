@@ -30,6 +30,7 @@ from typing import Any
 from amt.jobs.data.features import build_eval_frame
 from amt.jobs.data.loaders import SplitGuard
 from amt.jobs.eval import cohorts as cohort_mod
+from amt.jobs.eval import paired as paired_mod
 from amt.jobs.eval.harness import HARNESS_VERSION, evaluate
 from amt.jobs.eval.paired import paired_comparison
 from amt.jobs.models.registry import recommend_with_pyfunc
@@ -291,16 +292,43 @@ def phase1(
         )
     baseline = load(str(baseline_uri))
 
-    cand_ranked = recommend_with_pyfunc(candidate, frame.histories, k_max)
-    base_ranked = recommend_with_pyfunc(baseline, frame.histories, k_max)
+    grouped = frame.grouped
+    if grouped:
+        catalog_size = frame.distinct_candidates or catalog_size
+
+    def rank(model) -> list[list[Any]]:
+        return recommend_with_pyfunc(
+            model,
+            frame.histories,
+            k_max,
+            candidates=frame.candidates if grouped else None,
+            positions=frame.positions if grouped else None,
+        )
+
+    cand_ranked = rank(candidate)
+    base_ranked = rank(baseline)
+
+    # Proxy sanity runs *before* any candidate number is read. If the offline
+    # metric does not track the product number for the ranker already in
+    # production, nothing below it can certify a new one, and displaying the
+    # candidate's score first is how a broken proxy gets approved anyway.
+    proxy = _proxy_sanity(
+        contract,
+        frame,
+        base_ranked,
+        settings["primary_metric"],
+        ks,
+        catalog_size,
+        spark,
+    )
 
     cand = evaluate(
         cand_ranked, frame.truths, ks=ks, catalog_size=catalog_size,
-        include_per_user=True,
+        include_per_user=True, gains=frame.gains,
     )
     base = evaluate(
         base_ranked, frame.truths, ks=ks, catalog_size=catalog_size,
-        include_per_user=True,
+        include_per_user=True, gains=frame.gains,
     )
     cand_per_user = cand.pop("per_user")
     base_per_user = base.pop("per_user")
@@ -321,6 +349,15 @@ def phase1(
 
     operational = _operational(candidate, frame.histories, k_max, frozen)
 
+    # Product units and the A/B sizing, in the unit the dashboard reports.
+    candidate_units = paired_mod.top_slot_conversions(cand_ranked, frame.truths, frame.gains)
+    baseline_units = paired_mod.top_slot_conversions(base_ranked, frame.truths, frame.gains)
+    design = paired_mod.ab_design(
+        baseline_units["per_1k"] / 1000.0,
+        candidate_units["per_1k"] / 1000.0,
+        renders_per_day=_renders_per_day(frame),
+    )
+
     return {
         "candidate_metrics": {k: float(v) for k, v in cand.items()},
         "baseline_metrics": {k: float(v) for k, v in base.items()},
@@ -330,6 +367,14 @@ def phase1(
         },
         "cohort_metrics": cohort_out,
         "operational": operational,
+        "proxy_sanity": proxy,
+        "proxy_valid": bool(proxy.get("passed", True)),
+        "product_units": {
+            "candidate": candidate_units,
+            "baseline": baseline_units,
+            "unit": "top-slot conversions per 1,000 renders",
+        },
+        "ab_design": design,
         "contract_hash": contract_hash,
         "harness_version": HARNESS_VERSION,
         "primary_metric": settings["primary_metric"],
@@ -339,6 +384,189 @@ def phase1(
         "splits_read": guard.reads,
         "status": "success",
         "error": None,
+    }
+
+
+def _renders_per_day(frame) -> float:
+    """Units per distinct day in the QA split -- the traffic the A/B sizing uses."""
+    days = _day_keys(frame)
+    distinct = len({d for d in days if d})
+    return float(len(frame.histories)) / distinct if distinct else 0.0
+
+
+def _day_keys(frame) -> list[str]:
+    """The calendar day of each unit, as ``YYYY-MM-DD``, or ``""`` when unknown."""
+    stamps = getattr(frame, "timestamps", None) or []
+    out = []
+    for value in stamps:
+        text = str(value or "")
+        out.append(text[:10] if len(text) >= 10 else "")
+    return out
+
+
+def _proxy_sanity(
+    contract: Mapping[str, Any],
+    frame,
+    baseline_ranked: Sequence[Sequence[Any]],
+    primary_metric: str,
+    ks: Sequence[int],
+    catalog_size: int,
+    spark: Any | None,
+) -> dict[str, Any]:
+    """Does the offline metric move with the product number, day by day?
+
+    Correlated on the *incumbent*: the model already in production, whose
+    product number is already being watched. If its offline score and the
+    dashboard's series disagree across days, the offline metric is not
+    measuring what the campaign claims, and the candidate's score is
+    uninterpretable however good it looks.
+
+    Two correlations are reported. The first is against an external series the
+    contract names (``product_metric_source``) -- a real cross-source test.
+    The second is against the split's own daily top-slot conversion rate, which
+    is the fallback when no external series is configured and is deliberately
+    the weaker evidence, because it shares our label.
+    """
+    criteria = dict(contract.get("acceptance_criteria") or {})
+    threshold = float(criteria.get("min_proxy_correlation", 0.5))
+    min_days = int(criteria.get("min_proxy_days", 7))
+
+    days = _day_keys(frame)
+    if not any(days):
+        return {
+            "passed": True,
+            "reason": "the split carries no timestamps, so no daily series exists",
+            "rho_external": None,
+            "rho_own_label": None,
+            "days": 0,
+            "threshold": threshold,
+            "checked": False,
+        }
+
+    offline = _daily_offline(frame, baseline_ranked, days, primary_metric, ks, catalog_size)
+    own = _daily_top_slot_rate(frame, baseline_ranked, days)
+    ordered = sorted(offline)
+    rho_own = paired_mod.spearman(
+        [offline[d] for d in ordered], [own[d] for d in ordered]
+    )
+
+    external = _external_series(contract, spark)
+    rho_external: float | None = None
+    overlap: list[str] = []
+    if external:
+        overlap = sorted(set(offline) & set(external))
+        rho_external = paired_mod.spearman(
+            [offline[d] for d in overlap], [external[d] for d in overlap]
+        )
+
+    rho = rho_external if rho_external is not None else rho_own
+    days_used = len(overlap) if external else len(ordered)
+    passed = True
+    reason = ""
+    if rho is None or rho != rho:  # nan
+        passed, reason = False, "the correlation is undefined: too few distinct daily values"
+    elif days_used < min_days:
+        passed, reason = (
+            False,
+            f"{days_used} overlapping day(s) is below the {min_days} the contract requires",
+        )
+    elif rho < threshold:
+        passed, reason = (
+            False,
+            f"rho={rho:.3f} is below the {threshold} the contract pre-registered: the "
+            "offline metric does not track the product number for the incumbent",
+        )
+
+    return {
+        "passed": passed,
+        "reason": reason,
+        "rho": None if rho is None else float(rho),
+        "rho_external": None if rho_external is None else float(rho_external),
+        "rho_own_label": None if rho_own != rho_own else float(rho_own),
+        "days": days_used,
+        "threshold": threshold,
+        "min_days": min_days,
+        "source": "external" if external else "own_label",
+        "offline_by_day": {d: float(offline[d]) for d in ordered},
+        "product_by_day": (
+            {d: float(external[d]) for d in overlap}
+            if external
+            else {d: float(own[d]) for d in ordered}
+        ),
+        "checked": True,
+    }
+
+
+def _daily_offline(
+    frame,
+    ranked: Sequence[Sequence[Any]],
+    days: Sequence[str],
+    primary_metric: str,
+    ks: Sequence[int],
+    catalog_size: int,
+) -> dict[str, float]:
+    """The incumbent's primary metric, recomputed on each day's units."""
+    buckets: dict[str, list[int]] = {}
+    for i, day in enumerate(days):
+        if day:
+            buckets.setdefault(day, []).append(i)
+    out: dict[str, float] = {}
+    for day, rows in buckets.items():
+        scored = evaluate(
+            [ranked[i] for i in rows],
+            [frame.truths[i] for i in rows],
+            ks=ks,
+            catalog_size=catalog_size,
+            gains=[frame.gains[i] for i in rows] if frame.gains else None,
+        )
+        out[day] = float(scored.get(primary_metric, 0.0))
+    return out
+
+
+def _daily_top_slot_rate(
+    frame, ranked: Sequence[Sequence[Any]], days: Sequence[str]
+) -> dict[str, float]:
+    """The split's own daily top-slot conversion rate, unweighted."""
+    hits: dict[str, list[float]] = {}
+    for i, day in enumerate(days):
+        if not day:
+            continue
+        picks = ranked[i] if i < len(ranked) else []
+        truth = frame.truths[i]
+        hits.setdefault(day, []).append(
+            1.0 if picks and picks[0] in truth else 0.0
+        )
+    return {day: sum(values) / len(values) for day, values in hits.items() if values}
+
+
+def _external_series(contract: Mapping[str, Any], spark: Any | None) -> dict[str, float]:
+    """The product metric's own daily series, read from the table the contract names.
+
+    Read-only and best effort: a missing grant or an unreachable table makes
+    the check fall back to the split's own label rather than failing QA for a
+    reason that has nothing to do with the model.
+    """
+    source = dict(contract.get("product_metric_source") or {})
+    table = str(source.get("table") or "")
+    if not table or spark is None:
+        return {}
+    date_column = str(source.get("date_column") or "")
+    value_column = str(source.get("value_column") or "")
+    if not (date_column and value_column):
+        return {}
+    where = str(source.get("filter_sql") or "") or "TRUE"
+    try:
+        rows = spark.sql(
+            f"SELECT cast({date_column} AS string) AS d, "
+            f"avg(cast({value_column} AS double)) AS v "
+            f"FROM {table} WHERE {where} GROUP BY 1"
+        ).collect()
+    except Exception:  # pragma: no cover - diagnostics, not a QA failure
+        return {}
+    return {
+        str(row["d"])[:10]: float(row["v"])
+        for row in rows
+        if row["d"] is not None and row["v"] is not None
     }
 
 

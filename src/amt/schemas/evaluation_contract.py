@@ -183,6 +183,25 @@ class SplitPolicy(AmtModel):
         return self
 
 
+class ProductMetricSource(AmtModel):
+    """An external daily series of the product number the campaign claims to move.
+
+    Named by the contract so QA can test "our offline metric tracks theirs"
+    against a number the campaign did not compute. For the proving rail this is
+    the dashboard's own Container CTR, built from a *different* source table --
+    which is what makes the check a real cross-source test rather than a
+    tautology against our own label.
+    """
+
+    table: str = Field(description="Fully-qualified table holding the daily series.")
+    date_column: str
+    value_column: str
+    filter_sql: str = Field(
+        default="", description="Boolean predicate selecting this container / cohort."
+    )
+    description: str = ""
+
+
 class AcceptanceCriteria(AmtModel):
     """Predefined, pre-registered criteria used by QA — never adjusted after seeing QA."""
 
@@ -194,6 +213,17 @@ class AcceptanceCriteria(AmtModel):
         default=0.02, description="Max tolerated relative regression on any reported cohort."
     )
     max_latency_ms_p95: float | None = None
+    # If the offline metric cannot be shown to track the product number for the
+    # ranker already in production, it cannot certify a new one.
+    min_proxy_correlation: float = Field(
+        default=0.5,
+        ge=-1.0,
+        le=1.0,
+        description="Minimum Spearman rho between the offline metric and the product metric.",
+    )
+    min_proxy_days: int = Field(
+        default=7, ge=0, description="Overlapping daily observations the correlation needs."
+    )
     notes: str = ""
 
 
@@ -214,6 +244,7 @@ class EvaluationContract(AmtModel):
     primary_metric: str
     evaluation_mode: EvaluationMode = "next_item"
     relevance_weighting: RelevanceWeighting = "none"
+    product_metric_source: ProductMetricSource | None = None
     propensity_floor: float = Field(
         default=0.02,
         gt=0.0,

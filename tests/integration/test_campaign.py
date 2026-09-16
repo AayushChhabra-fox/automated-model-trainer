@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from langgraph.types import Command
 
@@ -509,6 +511,73 @@ def test_a_grouped_contract_without_a_group_key_is_refused(evaluation_contract):
 
     with pytest.raises(ValidationError, match="group_key"):
         EvaluationContract.model_validate(payload)
+
+
+# --- the report, and the gate that decides whether it means anything --------------------------
+def test_a_failed_proxy_check_stops_the_campaign_without_reading_the_candidate(campaign):
+    """A metric that does not track the product number cannot certify a model.
+
+    The verdict is reached in code, before the QA agent is asked, so a
+    persuasive narrative cannot talk past a broken proxy.
+    """
+    graph, config, executor, responder = campaign(
+        qa_outcome="PASS", proxy_correlation=0.21, converge_after=1
+    )
+
+    hc4 = run_to_hc4(graph, config)
+    assert hc4 and hc4["checkpoint"] == "HC4"
+
+    state = graph_state(graph, config)
+    assert state["qa_decision"] is QADecision.SPEC_REVIEW
+    assert state["status"] == "spec_review"
+    assert "0.21" in state["qa_assessment"].rationale
+    assert "not read" in state["qa_assessment"].rationale
+    # The QA agent was never consulted: the proxy decided it.
+    assert "assessment" not in responder.counts
+
+    report = state["experimentation_report"]
+    assert report.proxy_sanity.passed is False
+    assert report.proxy_sanity.rho == 0.21
+
+
+def test_a_passing_campaign_carries_a_report_in_product_units(campaign):
+    graph, config, executor, responder = campaign(qa_outcome="PASS", converge_after=1)
+
+    run_to_hc4(graph, config)
+    report = graph_state(graph, config)["experimentation_report"]
+
+    assert report.proxy_sanity.passed is True
+    assert report.primary_metric == "ndcg@10"
+    assert report.primary_significant is True
+    assert report.product_units.candidate > report.product_units.baseline
+    assert report.ab_design.required_renders > 0
+    assert report.cohort_table, "the contract's cohorts are reported, not averaged away"
+
+
+def test_a_negative_result_gets_the_same_report_as_a_passing_one(campaign):
+    """A negative read on the incumbent's own ground is still the first honest one."""
+    graph, config, executor, responder = campaign(qa_outcome="FAIL_HYPOTHESIS", converge_after=1)
+
+    run_to_hc4(graph, config)
+    state = graph_state(graph, config)
+    report = state["experimentation_report"]
+
+    assert state["qa_decision"] is QADecision.FAIL_HYPOTHESIS
+    assert report.proxy_sanity.passed is True
+    assert report.primary_significant is False, "the CI includes zero"
+    assert report.product_units.unit
+
+
+def test_the_report_is_rendered_to_html_beside_the_campaign(campaign, settings):
+    graph, config, executor, responder = campaign(qa_outcome="PASS", converge_after=1)
+
+    run_to_hc4(graph, config)
+    path = graph_state(graph, config)["report_path"]
+
+    assert path and path.endswith(".html")
+    html = Path(path).read_text(encoding="utf-8")
+    assert "Is the offline metric measuring the product?" in html
+    assert "top-slot conversions per 1,000 renders" in html
 
 
 # --- HC_CHAMPION: one review per hypothesis ---------------------------------------------------

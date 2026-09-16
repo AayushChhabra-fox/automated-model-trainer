@@ -59,11 +59,16 @@ class LocalMockExecutor:
         self,
         qa_outcome: QaOutcome = "PASS",
         phase0_invalid_first_attempt: bool = False,
+        proxy_correlation: float | None = None,
         converge_after: int = 3,
         expected_contract_hash: str | None = None,
     ) -> None:
         self.qa_outcome: QaOutcome = qa_outcome
         self.phase0_invalid_first_attempt = phase0_invalid_first_attempt
+        # The Spearman rho QA phase 1 reports. Below the contract's threshold
+        # the decision node returns SPEC_REVIEW without reading a candidate
+        # number, which is the behaviour worth testing.
+        self.proxy_correlation = proxy_correlation
         self.converge_after = converge_after
         self.expected_contract_hash = expected_contract_hash
         self.calls: list[str] = []
@@ -325,9 +330,51 @@ class LocalMockExecutor:
             )
             for idx, c in enumerate(contract.cohorts)
         }
+        threshold = contract.acceptance_criteria.min_proxy_correlation
+        rho = 0.82 if self.proxy_correlation is None else float(self.proxy_correlation)
+        proxy_passed = rho >= threshold
+        units = {
+            "unit": "top-slot conversions per 1,000 renders",
+            "candidate": {
+                "per_1k": candidate * 1000.0,
+                "ci_low": (candidate + ci[0]) * 1000.0,
+                "ci_high": (candidate + ci[1]) * 1000.0,
+                "n_renders": 10_000,
+            },
+            "baseline": {
+                "per_1k": baseline * 1000.0,
+                "ci_low": baseline * 990.0,
+                "ci_high": baseline * 1010.0,
+                "n_renders": 10_000,
+            },
+        }
         return Phase1Result(
             mlflow_run_id="mlflow-qa1",
             primary_metric=metric,
+            proxy_valid=proxy_passed,
+            proxy_sanity={
+                "passed": proxy_passed,
+                "checked": True,
+                "rho": rho,
+                "rho_external": rho,
+                "rho_own_label": rho + 0.05,
+                "days": 7,
+                "threshold": threshold,
+                "source": "external",
+                "reason": ""
+                if proxy_passed
+                else f"rho={rho:.3f} is below the {threshold} the contract pre-registered",
+            },
+            product_units=units,
+            ab_design={
+                "baseline_rate": baseline,
+                "candidate_rate": candidate,
+                "absolute_effect": mean_delta,
+                "relative_effect": mean_delta / baseline if baseline else 0.0,
+                "required_renders": 180_000.0,
+                "days_at_current_traffic": 2.1,
+                "mde": 0.004,
+            },
             qa_metrics={f"qa/{metric}": candidate, "qa/recall@10": candidate * 1.4},
             baseline_metrics={f"qa/{metric}": baseline, "qa/recall@10": baseline * 1.4},
             paired_deltas=[primary, secondary],

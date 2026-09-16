@@ -117,6 +117,7 @@ def log_final_run(
     phase1: Any | None = None,
     code_version: str = "",
     settings: Settings | None = None,
+    report_html: str = "",
 ) -> str:
     """Stage 12: log the final campaign run (lineage, QA metrics, report). Returns run id."""
     settings = settings or get_settings()
@@ -154,6 +155,12 @@ def log_final_run(
             (root / "conclusion.md").write_text(
                 getattr(conclusion, "report_markdown", "") or "", encoding="utf-8"
             )
+            # `report.html` sits beside `conclusion.md` deliberately: the
+            # narrative and the evidence it was written from travel together.
+            if report_html and Path(report_html).exists():
+                (root / "report.html").write_text(
+                    Path(report_html).read_text(encoding="utf-8"), encoding="utf-8"
+                )
             mlflow.log_artifacts(str(root))
         return run.info.run_id
 

@@ -11,7 +11,7 @@ from amt.graph.routing import (
     assert_ready_for_qa,
 )
 from amt.graph.state import CampaignState, Stage
-from amt.schemas.qa import QADecision
+from amt.schemas.qa import QAAssessment, QADecision
 
 
 def make_qa_phase0_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
@@ -96,6 +96,30 @@ def make_qa_decision_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         phase1 = state.get("qa_phase1")
         if phase1 is None:
             raise ContractViolation("No Phase 1 evidence to decide on.")
+
+        if not phase1.proxy_valid:
+            # Decided in code, before the agent sees a candidate number. A
+            # metric that does not track the product number for the ranker
+            # already in production cannot certify a new one, and that is a
+            # finding about the evaluation design rather than about the model.
+            reason = str((phase1.proxy_sanity or {}).get("reason") or "")
+            return {
+                "stage": Stage.QA_DECISION.value,
+                "qa_decision": QADecision.SPEC_REVIEW,
+                "qa_assessment": QAAssessment(
+                    decision=QADecision.SPEC_REVIEW,
+                    rationale=(
+                        "The offline primary metric does not track the product metric for "
+                        f"the incumbent: {reason}. The candidate's own numbers are not "
+                        "interpretable under this contract, so they were not read."
+                    ),
+                    acceptance_criteria_met={"proxy_sanity": False},
+                    evidence=["proxy-sanity correlation on the QA split's daily slices"],
+                    spec_review_reasons=[reason or "proxy correlation below the threshold"],
+                ),
+                "status": "spec_review",
+            }
+
         assessment = deps.qa_agent.decide(
             phase0=phase0, phase1=phase1, contract=state.get("evaluation_contract"),
             frozen=state.get("frozen_champion"),

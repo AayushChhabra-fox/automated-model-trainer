@@ -164,7 +164,10 @@ class RecommenderPyfunc(_PythonModel):  # type: ignore[valid-type,misc]
       * ``history`` -- the user's past item ids, as a list or a JSON array
         string (the JSON form is what the logged signature declares, so the
         model is servable over REST);
-      * ``k`` -- optional, per-row top-K (defaults to 10).
+      * ``k`` -- optional, per-row top-K (defaults to 10);
+      * ``candidates`` -- optional, the closed set to re-rank (the items a
+        container actually showed). Absent, the model generates its own;
+      * ``positions`` -- optional, the incumbent's slot for each candidate.
 
     Output: a DataFrame with one ``items`` column holding the ranked item ids
     -- JSON strings when the input used JSON strings, plain lists otherwise.
@@ -196,7 +199,11 @@ class RecommenderPyfunc(_PythonModel):  # type: ignore[valid-type,misc]
         histories = [as_item_list(h) for h in raw_histories]
 
         k = max(ks) if ks else default_k
-        ranked = self.model.recommend(histories, k)
+        extra: dict[str, Any] = {}
+        for column in ("candidates", "positions"):
+            if hasattr(model_input, "columns") and column in model_input.columns:
+                extra[column] = [as_item_list(v) for v in model_input[column].tolist()]
+        ranked = self.model.recommend(histories, k, **extra)
         trimmed = [list(r)[: ks[i]] for i, r in enumerate(ranked)]
 
         import pandas as pd
@@ -271,21 +278,29 @@ def log_pyfunc_model(
 
 
 def recommend_with_pyfunc(
-    pyfunc_model: Any, histories: Sequence[Sequence[Any]], k: int = 10
+    pyfunc_model: Any,
+    histories: Sequence[Sequence[Any]],
+    k: int = 10,
+    candidates: Sequence[Sequence[Any]] | None = None,
+    positions: Sequence[Sequence[float]] | None = None,
 ) -> list[list[Any]]:
     """Call a loaded pyfunc model through its declared serving interface.
 
     QA uses this rather than the trainer's in-memory object: same math,
-    different code path (PLAN §6, "QA independence").
+    different code path (PLAN §6, "QA independence"). ``candidates`` carries
+    the closed impression set in ``grouped_rerank`` mode.
     """
     import pandas as pd
 
-    frame = pd.DataFrame(
-        {
-            "history": [json.dumps(list(h), default=str) for h in histories],
-            "k": [int(k)] * len(histories),
-        }
-    )
+    columns: dict[str, Any] = {
+        "history": [json.dumps(list(h), default=str) for h in histories],
+        "k": [int(k)] * len(histories),
+    }
+    if candidates is not None:
+        columns["candidates"] = [json.dumps(list(c), default=str) for c in candidates]
+    if positions is not None:
+        columns["positions"] = [json.dumps(list(p), default=str) for p in positions]
+    frame = pd.DataFrame(columns)
     try:
         out = pyfunc_model.predict(frame)
     except TypeError:

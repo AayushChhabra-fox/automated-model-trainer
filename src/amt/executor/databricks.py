@@ -665,6 +665,12 @@ def _to_phase1_result(payload: Mapping[str, Any]) -> Any:
         "operational": {
             k: float(v) for k, v in (payload.get("operational") or {}).items()
         },
+        "proxy_valid": bool(payload.get("proxy_valid", True)),
+        "proxy_sanity": dict(payload.get("proxy_sanity") or {}),
+        "product_units": dict(payload.get("product_units") or {}),
+        "ab_design": {
+            k: float(v) for k, v in (payload.get("ab_design") or {}).items()
+        },
         "qa_population_size": int(payload.get("n_qa_users") or 0),
         "contract_hash": payload.get("contract_hash") or "",
         "harness_version": payload.get("harness_version") or "",

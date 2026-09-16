@@ -26,6 +26,7 @@ __all__ = [
     "list_campaigns",
     "masked_settings",
     "pending_interrupt",
+    "report_rows",
     "shape_rows",
     "state",
     "summary_rows",
@@ -175,6 +176,62 @@ def champion_rows(payload: dict) -> list[dict[str, str]]:
                     metric: f"{value:.5f}" if isinstance(value, (int, float)) else str(value)
                     for metric, value in (entry.get("metrics") or {}).items()
                 },
+            }
+        )
+    return rows
+
+
+def report_rows(report: Any) -> list[dict[str, str]]:
+    """The experimentation report as a few lines, in the order that decides.
+
+    Proxy sanity first: if the offline metric does not track the product
+    number, the rest is not evidence. Then the effect in product units, then
+    the offline delta, then what an online test would cost.
+    """
+    if report is None:
+        return []
+    proxy = report.proxy_sanity
+    units = report.product_units
+    design = report.ab_design
+    rows = [
+        {
+            "": "proxy sanity",
+            "value": "not checked"
+            if not proxy.checked
+            else f"{'pass' if proxy.passed else 'FAIL'} rho={proxy.rho:.3f}"
+            if proxy.rho is not None
+            else ("pass" if proxy.passed else "FAIL"),
+            "detail": proxy.reason or f"{proxy.days} day(s), {proxy.source}",
+        },
+        {
+            "": units.unit,
+            "value": f"{units.delta:+.2f}",
+            "detail": f"candidate {units.candidate:.2f} vs incumbent {units.baseline:.2f}",
+        },
+        {
+            "": report.primary_metric,
+            "value": f"{report.primary_delta:+.5f}",
+            "detail": (
+                f"CI {report.primary_ci[0]:+.5f} to {report.primary_ci[1]:+.5f}"
+                + (" (excludes zero)" if report.primary_significant else " (includes zero)")
+            ),
+        },
+    ]
+    if design.required_renders:
+        days = design.days_at_current_traffic
+        rows.append(
+            {
+                "": "online test",
+                "value": f"{design.required_renders:,.0f} renders",
+                "detail": f"{days:.1f} days at this rail's traffic" if days else "",
+            }
+        )
+    if report.regressions:
+        rows.append(
+            {
+                "": "cohort regressions",
+                "value": str(len(report.regressions)),
+                "detail": ", ".join(report.regressions),
             }
         )
     return rows

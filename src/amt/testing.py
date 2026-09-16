@@ -633,6 +633,7 @@ def fake_llm_factory(responder: CannedResponder) -> Callable[[str], FakeLLM]:
 def mock_stack(
     qa_outcome: QaOutcome = "PASS",
     phase0_invalid_first_attempt: bool = False,
+    proxy_correlation: float | None = None,
     converge_after: int = 3,
     n_hypotheses: int = 1,
     family: str = "sasrec",
@@ -651,6 +652,7 @@ def mock_stack(
     executor = LocalMockExecutor(
         qa_outcome=qa_outcome,
         phase0_invalid_first_attempt=phase0_invalid_first_attempt,
+        proxy_correlation=proxy_correlation,
         converge_after=converge_after,
     )
     return executor, fake_llm_factory(responder), responder

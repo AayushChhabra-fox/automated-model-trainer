@@ -11,7 +11,7 @@ from typing import Any, Literal, TypedDict
 
 from amt.schemas.champion import FrozenChampion, HypothesisChampion
 from amt.schemas.common import ExperimentBudget, new_id, utcnow
-from amt.schemas.conclusion import ScientificConclusion
+from amt.schemas.conclusion import ExperimentationReport, ScientificConclusion
 from amt.schemas.evaluation_contract import EvaluationContract, SplitMaterialization
 from amt.schemas.experiment_config import ExperimentConfig
 from amt.schemas.feature_recipe import (
@@ -121,6 +121,9 @@ class CampaignState(TypedDict, total=False):
 
     # Stage 11/12
     conclusion: ScientificConclusion | None
+    # The decision-ready evidence behind the conclusion's narrative.
+    experimentation_report: ExperimentationReport | None
+    report_path: str
     mlflow_final_run_id: str | None
     promotion_decision: str | None
 
@@ -191,6 +194,8 @@ def new_campaign_state(
         qa_assessment=None,
         qa_decision=None,
         conclusion=None,
+        experimentation_report=None,
+        report_path="",
         mlflow_final_run_id=None,
         promotion_decision=None,
         human_feedback=None,

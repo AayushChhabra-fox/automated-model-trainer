@@ -155,6 +155,7 @@ def campaign(settings: Settings):
         campaign_id: str = "test-campaign",
         qa_outcome: str = "PASS",
         phase0_invalid_first_attempt: bool = False,
+        proxy_correlation: float | None = None,
         converge_after: int = 3,
         n_hypotheses: int = 1,
         executor: Any | None = None,
@@ -166,6 +167,7 @@ def campaign(settings: Settings):
         mock_executor, llm_factory, canned = mock_stack(
             qa_outcome=qa_outcome,  # type: ignore[arg-type]
             phase0_invalid_first_attempt=phase0_invalid_first_attempt,
+            proxy_correlation=proxy_correlation,
             converge_after=converge_after,
             n_hypotheses=n_hypotheses,
             family=family,

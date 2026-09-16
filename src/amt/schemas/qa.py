@@ -105,6 +105,14 @@ class Phase1Result(AmtModel):
         default_factory=dict,
         description="latency_ms_p50/p95, throughput_qps, model_size_mb, cost_usd_per_1k, ...",
     )
+    # Read before any candidate number: if the incumbent's offline metric does
+    # not track the product number day by day, nothing below can certify a
+    # replacement, and the QA decision is SPEC_REVIEW rather than a verdict on
+    # the model.
+    proxy_valid: bool = True
+    proxy_sanity: dict = Field(default_factory=dict)
+    product_units: dict = Field(default_factory=dict)
+    ab_design: dict[str, float] = Field(default_factory=dict)
     stability_notes: str = ""
     failure_cases: list[str] = Field(default_factory=list)
     qa_population_size: int = 0

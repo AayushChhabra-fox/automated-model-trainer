@@ -197,6 +197,11 @@ def summarize(payload: dict) -> Any:
     )
 
 
+def summarize_report(report: Any) -> Table:
+    """The experimentation report as a terminal table; the HTML is the full read."""
+    return _table("experimentation report", monitor.report_rows(report))
+
+
 def _table(title: str, rows: list[dict[str, str]], drop: tuple[str, ...] = ()) -> Table:
     """Render row dicts as a Rich table, one column per key."""
     table = Table(title=title, header_style="bold", show_lines=True)
@@ -605,6 +610,13 @@ def report(
     table.add_row("mlflow_final_run_id", str(state.get("mlflow_final_run_id") or ""))
     table.add_row("contract_hash", str(state.get("contract_hash") or "")[:12])
     console.print(table)
+
+    report = state.get("experimentation_report")
+    if report is not None:
+        console.print(summarize_report(report))
+    path = str(state.get("report_path") or "")
+    if path:
+        console.print(f"[green]report[/green] file://{path}")
 
 
 @app.command()

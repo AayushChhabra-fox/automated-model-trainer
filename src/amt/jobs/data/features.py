@@ -166,6 +166,9 @@ class EvalFrame:
     candidates: list[list[Any]] | None = None
     positions: list[list[float]] | None = None
     gains: list[dict[Any, float]] | None = None
+    #: When the unit happened, for the daily slices the proxy-sanity check
+    #: correlates against the product metric's own daily series.
+    timestamps: list[Any] | None = None
 
     def __len__(self) -> int:
         return len(self.user_ids)
@@ -303,6 +306,7 @@ def _grouped_eval_frame(frame, unit_ids: list[Any], index: ItemIndex | None) -> 
         candidates=candidates,
         positions=positions,
         gains=gains if weights is not None else None,
+        timestamps=frame["ts"].tolist() if "ts" in frame.columns else None,
     )
 
 
