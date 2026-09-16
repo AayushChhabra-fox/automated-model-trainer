@@ -362,3 +362,22 @@ def test_an_empty_report_still_renders():
     """A SPEC_REVIEW campaign gets the same page as a passing one."""
     html = render_report(ExperimentationReport())
     assert "<html" in html and "</html>" in html
+
+
+def test_the_validation_verdict_is_computed_not_narrated():
+    from types import SimpleNamespace
+
+    from amt.graph.nodes.conclusion import validation_verdict
+
+    champions = [
+        SimpleNamespace(hypothesis_id="H1", primary_metric_value=0.7502),
+        SimpleNamespace(hypothesis_id="H4", primary_metric_value=0.7535),
+    ]
+    verdict = validation_verdict({"ndcg@4": 0.7911}, champions, "ndcg@4")
+
+    assert verdict["any_beats_baseline"] is False
+    h4 = verdict["champions"][1]
+    assert h4["beats_baseline"] is False
+    assert abs(h4["delta"] - (-0.0376)) < 1e-4
+    assert abs(h4["relative_delta"] - (-0.0475)) < 1e-3
+    assert validation_verdict({}, [], "ndcg@4") is None

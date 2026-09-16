@@ -276,3 +276,22 @@ def test_an_unknown_rewind_target_is_refused():
 
     with pytest.raises(ValueError, match="backlog"):
         rewind_update(_mid_flight_state(), "hc3", "no")
+
+
+def test_rewinding_to_qa_keeps_the_frozen_champion_and_clears_only_qa():
+    from amt.graph.human import rewind_update
+
+    state = {**_mid_flight_state(), "frozen_champion": object(), "qa_decision": "INVALID_EXPERIMENT"}
+    as_node, values = rewind_update(state, "qa", "pyfunc signature dropped the candidates")
+
+    assert as_node == "freeze_champion"
+    assert values["qa_phase0"] is None and values["qa_decision"] is None and values["conclusion"] is None
+    assert values["phase0_attempts"] == 0
+    assert "frozen_champion" not in values and "hypotheses" not in values, "the artifact is untouched"
+
+
+def test_rewinding_to_qa_without_a_freeze_is_refused():
+    from amt.graph.human import rewind_update
+
+    with pytest.raises(ValueError, match="nothing is frozen"):
+        rewind_update(_mid_flight_state(), "qa", "too early")

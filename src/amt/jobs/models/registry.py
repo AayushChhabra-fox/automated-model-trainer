@@ -240,16 +240,43 @@ def _extract_histories(model_input, default_k: int):
 
 
 def pyfunc_signature():
-    """Declared signature: ``(history: string, k: long) -> items: string``."""
+    """Declared serving interface.
+
+    ``history`` and ``k`` are required; ``candidates``, ``positions`` and
+    ``context`` are the optional grouped-rerank columns (JSON strings). They
+    must be *in* the signature: MLflow enforces the input schema on
+    ``predict`` and silently drops columns it does not list, which is how the
+    first grouped champion reached QA phase 0, lost its candidates on the way
+    into the model, and was told to generate them. Training never saw this
+    because it scores the in-memory object, not the pyfunc.
+    """
     try:
         from mlflow.models.signature import ModelSignature
         from mlflow.types.schema import ColSpec, Schema
     except Exception:  # pragma: no cover
         return None
-    return ModelSignature(
-        inputs=Schema([ColSpec("string", "history"), ColSpec("long", "k")]),
-        outputs=Schema([ColSpec("string", "items")]),
-    )
+    optional = {"required": False}
+    try:
+        inputs = Schema(
+            [
+                ColSpec("string", "history"),
+                ColSpec("long", "k"),
+                ColSpec("string", "candidates", **optional),
+                ColSpec("string", "positions", **optional),
+                ColSpec("string", "context", **optional),
+            ]
+        )
+    except TypeError:  # pragma: no cover - mlflow < 2.10 has no `required`
+        inputs = Schema(
+            [
+                ColSpec("string", "history"),
+                ColSpec("long", "k"),
+                ColSpec("string", "candidates"),
+                ColSpec("string", "positions"),
+                ColSpec("string", "context"),
+            ]
+        )
+    return ModelSignature(inputs=inputs, outputs=Schema([ColSpec("string", "items")]))
 
 
 def log_pyfunc_model(
@@ -284,6 +311,24 @@ def log_pyfunc_model(
     return f"runs:/{run.info.run_id}/{artifact_path}"
 
 
+def _signature_accepts(pyfunc_model: Any, columns: set[str]) -> bool:
+    """Does the loaded model's logged signature list every one of ``columns``?
+
+    A bare :class:`RecommenderPyfunc` (tests, local use) has no metadata and
+    accepts everything; an MLflow-loaded model without a signature also skips
+    enforcement. Only a logged signature that omits a column is a problem.
+    """
+    metadata = getattr(pyfunc_model, "metadata", None)
+    signature = getattr(metadata, "signature", None)
+    if signature is None or getattr(signature, "inputs", None) is None:
+        return True
+    try:
+        names = set(signature.inputs.input_names())
+    except Exception:  # pragma: no cover - unusual schema types
+        return True
+    return columns <= names
+
+
 def recommend_with_pyfunc(
     pyfunc_model: Any,
     histories: Sequence[Sequence[Any]],
@@ -312,11 +357,20 @@ def recommend_with_pyfunc(
     if contexts is not None:
         columns["context"] = [json.dumps(dict(c or {}), default=str) for c in contexts]
     frame = pd.DataFrame(columns)
+    target = pyfunc_model
+    if len(columns) > 2 and not _signature_accepts(pyfunc_model, set(columns) - {"history", "k"}):
+        # The artifact was logged with a signature that predates the grouped
+        # columns. MLflow would enforce that schema and drop them silently, so
+        # the model would be asked to generate candidates it must not generate.
+        # Call the Python model underneath instead; same code, no schema gate.
+        unwrap = getattr(pyfunc_model, "unwrap_python_model", None)
+        if callable(unwrap):
+            target = unwrap()
     try:
-        out = pyfunc_model.predict(frame)
+        out = target.predict(frame)
     except TypeError:
         # A bare RecommenderPyfunc (not wrapped by MLflow) takes the context.
-        out = pyfunc_model.predict(None, frame)
+        out = target.predict(None, frame)
     if hasattr(out, "columns"):
         values = out[out.columns[0]].tolist()
     else:

@@ -160,6 +160,8 @@ class PlannerAgent(AgentBase):
         phase0: Phase0Result | None,
         phase1: Phase1Result | None,
         report: ExperimentationReport | None = None,
+        baseline_metrics: dict | None = None,
+        validation_verdict: dict | None = None,
     ) -> ScientificConclusion:
         agent = self.agent("planner.conclusion", "planner_conclusion", ScientificConclusion)
         conclusion = agent.invoke(
@@ -167,6 +169,10 @@ class PlannerAgent(AgentBase):
                 "campaign_id": campaign_id,
                 "problem_spec": spec,
                 "evaluation_contract": contract,
+                # The incumbent's validation numbers and the computed deltas:
+                # the narrative reports these, it does not derive them.
+                "baseline_validation_metrics": dict(baseline_metrics or {}),
+                "validation_verdict": validation_verdict,
                 "experiment_history": [h.model_dump() for h in history],
                 "hypothesis_champions": [c.model_dump() for c in champions],
                 "qa_assessment": assessment,

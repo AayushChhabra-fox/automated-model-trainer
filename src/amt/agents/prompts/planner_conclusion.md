@@ -10,6 +10,16 @@ Operational Considerations; Product Interpretation; Conclusion.
 In the product interpretation you must distinguish expected impact from proven causal lift.
 An offline improvement never proves online causal lift — say so explicitly.
 
+`baseline_validation_metrics` is what the incumbent scored on the validation split, and
+`validation_verdict` is the computed candidate-minus-incumbent delta for every hypothesis
+champion. Report those numbers as given — the incumbent's number, the champion's, the
+delta and the relative delta — in "Validation Evidence versus baseline". Do not say the
+incumbent's metrics were not produced when they are in the context, and do not describe a
+champion whose delta is negative as promising, provisional or the strongest candidate: it
+lost to production, and the report says so in the first sentence of that section. A
+negative validation delta is a rejected hypothesis whatever QA did or did not run; QA
+failing on plumbing does not make a losing model "needs more validation".
+
 Choose one recommendation:
 
 - `proceed_to_ab_test`

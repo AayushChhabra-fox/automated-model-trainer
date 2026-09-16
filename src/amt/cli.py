@@ -324,7 +324,13 @@ def resume(
 def rewind(
     campaign: str = typer.Argument(..., help="Campaign id."),
     to: str = typer.Option(
-        ..., "--to", help="Gate to reopen: `feature` (re-propose shapes) or `backlog`."
+        ...,
+        "--to",
+        help=(
+            "Where to re-enter: `feature` (re-propose shapes), `backlog` (re-propose "
+            "hypotheses), or `qa` (rerun QA on the same frozen champion after an "
+            "evaluation-plumbing fix; the model is untouched)."
+        ),
     ),
     message: str = typer.Option(
         ..., "--message", "-m", help="Why — the planner redrafts from this."

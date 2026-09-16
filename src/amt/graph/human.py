@@ -161,6 +161,10 @@ REWIND_TARGETS: dict[str, str] = {
     "backlog": "run_baseline",
     # Re-propose the shapes: continue from the approved backlog, into planner_feature_fit.
     "feature": "hc_hypotheses",
+    # Re-run QA on the *same* frozen champion: continue from the freeze, into qa_phase0.
+    # SPEC Stage 9: "If a technical defect exists, correct the defect and rerun Phase 0.
+    # The correction must not modify the model." Nothing about the model changes here.
+    "qa": "freeze_champion",
 }
 
 
@@ -180,8 +184,28 @@ def rewind_update(state: Mapping[str, Any], to: str, reason: str) -> tuple[str, 
     """
     if to not in REWIND_TARGETS:
         raise ValueError(f"cannot rewind to {to!r}; choose one of {sorted(REWIND_TARGETS)}")
-    if state.get("frozen_champion") is not None:
-        raise ValueError("a frozen champion cannot be rewound; QA has begun. Start a new campaign.")
+    frozen = state.get("frozen_champion") is not None
+    if to == "qa":
+        if not frozen:
+            raise ValueError("nothing is frozen yet; QA has not begun, so there is nothing to rerun.")
+        return REWIND_TARGETS[to], {
+            "human_feedback": reason,
+            "status": "running",
+            "awaiting": None,
+            "qa_phase0": None,
+            "phase0_attempts": 0,
+            "qa_phase1": None,
+            "qa_assessment": None,
+            "qa_decision": None,
+            "conclusion": None,
+            "experimentation_report": None,
+            "mlflow_final_run_id": None,
+        }
+    if frozen:
+        raise ValueError(
+            "a frozen champion cannot be rewound into training; QA has begun. "
+            "Use --to qa to rerun QA on the same artifact, or start a new campaign."
+        )
 
     hypotheses = list(state.get("hypotheses") or [])
     reopened = [h for h in hypotheses if h.status == "active"]

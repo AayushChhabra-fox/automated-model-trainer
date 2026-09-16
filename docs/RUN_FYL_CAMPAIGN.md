@@ -454,7 +454,23 @@ uv run amt rewind lfy-ctv-rerank-2026q3 --to feature \
 Nothing that ran is erased; the mid-flight hypothesis goes back to `pending` and
 its budget slot comes back; the planner redrafts every shape from your message and
 `HC_FEATURE` comes round again. `--to backlog` reopens the hypothesis list instead.
-Refused once a champion is frozen — after that, a new campaign.
+Both are refused once a champion is frozen — after that, a new campaign.
+
+**QA failed on plumbing, not on the model** (Phase 0 could not reproduce because
+the harness passed the model the wrong inputs; the conclusion came out
+`INVALID_EXPERIMENT` with a `technical_defect`). SPEC Stage 9 allows exactly one
+thing here: fix the defect and rerun Phase 0 *without touching the model*. That is
+the only rewind allowed after the freeze:
+
+```bash
+uv run amt rewind lfy-ctv-rerank-2026q3 --to qa \
+  -m "pyfunc signature dropped candidates/positions/context; rerun QA on the frozen artifact"
+```
+
+The frozen champion, its MLflow run and every training result stay as they are;
+only `qa_*`, the conclusion and the experimentation report are cleared, and the
+graph re-enters at Phase 0. A losing champion stays a losing champion — this
+exists to get a *valid* verdict, not a different one.
 
 A Databricks failure currently **raises out of the graph** rather than being
 handed to the Trainer. The campaign is resumable — the checkpointer has

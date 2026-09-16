@@ -369,7 +369,7 @@ def phase1(
                 merged[f"delta/{metric}"] = float(block.get(metric, 0.0)) - float(value)
         cohort_out[cohort] = merged
 
-    operational = _operational(candidate, frame.histories, k_max, frozen)
+    operational = _operational(candidate, frame, k_max, frozen)
 
     # Product units and the A/B sizing, in the unit the dashboard reports.
     candidate_units = paired_mod.top_slot_conversions(cand_ranked, frame.truths, frame.gains)
@@ -592,17 +592,28 @@ def _external_series(contract: Mapping[str, Any], spark: Any | None) -> dict[str
     }
 
 
-def _operational(
-    model, histories: Sequence[Sequence[Any]], k: int, frozen: Mapping[str, Any]
-) -> dict[str, float]:
-    """Serving-shaped measurements: single-request latency, size, params."""
+def _operational(model, frame, k: int, frozen: Mapping[str, Any]) -> dict[str, float]:
+    """Serving-shaped measurements: single-request latency, size, params.
+
+    One request is one unit *with everything a request carries*: in grouped
+    mode that is the render's candidates and context, or the model is being
+    timed on a code path it never serves (and refuses to run).
+    """
     import numpy as np
 
-    sample = list(histories[:64]) or [[]]
+    n = min(64, len(frame.histories)) or 1
     timings = []
-    for history in sample:
+    for i in range(n):
+        history = frame.histories[i] if i < len(frame.histories) else []
+        kwargs: dict[str, Any] = {}
+        if frame.grouped:
+            kwargs["candidates"] = [frame.candidates[i]]
+            if frame.positions is not None:
+                kwargs["positions"] = [frame.positions[i]]
+            if frame.contexts is not None:
+                kwargs["contexts"] = [frame.contexts[i]]
         start = time.perf_counter()
-        recommend_with_pyfunc(model, [history], k)
+        recommend_with_pyfunc(model, [history], k, **kwargs)
         timings.append((time.perf_counter() - start) * 1000.0)
 
     return {

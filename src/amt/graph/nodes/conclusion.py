@@ -31,26 +31,41 @@ def make_conclusion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         # Built first and handed to the agent as context: the Planner writes
         # the narrative, never the numbers.
         report = build_report(state)
+        champions = list(state.get("hypothesis_champions") or [])
+        verdict = validation_verdict(
+            state.get("baseline_metrics") or {},
+            champions,
+            contract.primary_metric if contract else "",
+        )
         conclusion = deps.planner_agent.write_conclusion(
             campaign_id=state.get("campaign_id", ""),
             spec=state.get("problem_spec"),
             contract=contract,
             history=list(state.get("experiment_history") or []),
-            champions=list(state.get("hypothesis_champions") or []),
+            champions=champions,
             assessment=state.get("qa_assessment"),
             phase0=state.get("qa_phase0"),
             phase1=state.get("qa_phase1"),
             report=report,
+            baseline_metrics=state.get("baseline_metrics") or {},
+            validation_verdict=verdict,
         )
-        conclusion = conclusion.model_copy(
-            update={
-                "campaign_id": state.get("campaign_id", ""),
-                "qa_decision": decision,
-                "contract_hash": state.get("contract_hash", ""),
-                "mlflow_experiment_id": state.get("mlflow_experiment_id", ""),
-                "negative_result": decision != QADecision.PASS,
-            }
-        )
+        update: dict = {
+            "campaign_id": state.get("campaign_id", ""),
+            "qa_decision": decision,
+            "contract_hash": state.get("contract_hash", ""),
+            "mlflow_experiment_id": state.get("mlflow_experiment_id", ""),
+            "negative_result": decision != QADecision.PASS,
+        }
+        # The recommendation is clamped to the numbers, not left to the prose.
+        # A champion that lost to the incumbent on validation is a rejected
+        # hypothesis whatever QA did or did not manage to run; the narrative
+        # may explain, it may not upgrade.
+        if verdict and not verdict["any_beats_baseline"]:
+            if decision != QADecision.SPEC_REVIEW:
+                update["recommendation"] = "hypothesis_rejected"
+            update["negative_result"] = True
+        conclusion = conclusion.model_copy(update=update)
         status = state.get("status")
         if decision == QADecision.SPEC_REVIEW:
             status = "spec_review"
@@ -62,6 +77,44 @@ def make_conclusion_node(deps: NodeDeps) -> Callable[[CampaignState], dict]:
         }
 
     return conclusion_node
+
+
+def validation_verdict(
+    baseline: dict[str, float], champions: list, primary: str
+) -> dict | None:
+    """Candidate-minus-incumbent on validation, per champion, as plain numbers.
+
+    Computed here so the conclusion cannot omit it, misread it, or claim the
+    incumbent's numbers "were not produced" -- which is what the first LFY
+    conclusion did while the incumbent sat 4.8 % above the champion.
+    """
+    if not primary or not champions:
+        return None
+    base = baseline.get(primary)
+    rows = []
+    for champion in champions:
+        value = champion.primary_metric_value
+        row = {"hypothesis_id": champion.hypothesis_id, primary: value}
+        if isinstance(base, (int, float)) and isinstance(value, (int, float)):
+            delta = float(value) - float(base)
+            row.update(
+                {
+                    f"baseline_{primary}": float(base),
+                    "delta": delta,
+                    "relative_delta": delta / float(base) if base else None,
+                    "beats_baseline": delta > 0,
+                }
+            )
+        rows.append(row)
+    return {
+        "primary_metric": primary,
+        "champions": rows,
+        "any_beats_baseline": any(r.get("beats_baseline") for r in rows),
+        "note": (
+            "Point deltas on the validation split. Paired confidence intervals "
+            "come from QA phase 1 only; if QA did not run, none exist."
+        ),
+    }
 
 
 def build_report(state: CampaignState) -> ExperimentationReport:
