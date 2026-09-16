@@ -349,8 +349,11 @@ def build_rows(
     history_values: dict[str, list[list[Any]]] = {name: [] for name in attribute_columns}
     history_items: list[list[Any]] = []
 
+    from amt.jobs.data.features import as_item_list
+
     for row, (history, items) in enumerate(zip(histories, candidates, strict=True)):
-        history = list(history or ())
+        history = as_item_list(history)
+        items = as_item_list(items)
         context = contexts[row] if contexts is not None and row < len(contexts) else {}
         seen_attrs = {
             column: [state.attribute_of(item, column) for item in history]
@@ -745,14 +748,16 @@ class TabularModel:
         ignored, because a model that scored on the slot it was given could not
         be served.
         """
+        from amt.jobs.data.features import as_item_list
+
         k = int(k)
-        histories = [list(h or ()) for h in histories]
+        histories = [as_item_list(h) for h in histories]
         if candidates is None:
             candidates = [
                 _candidates_for(self.recipe, self.state, history) for history in histories
             ]
         else:
-            candidates = [list(row or ()) for row in candidates]
+            candidates = [as_item_list(row) for row in candidates]
         scores, groups, items = self.score(histories, candidates, contexts=contexts)
 
         out: list[list[Any]] = [[] for _ in histories]
@@ -927,15 +932,21 @@ def grouped_rows(
     converted in are skipped: they carry no signal for a ranker and no positive
     for a classifier, and the harness excludes them too.
     """
+    # Spark -> pandas hands array columns over as numpy arrays, whose truth
+    # value is ambiguous; `as_item_list` is the one boundary that turns lists,
+    # arrays and JSON strings into plain lists. Never test an array column with
+    # `or` / `if` directly.
+    from amt.jobs.data.features import as_item_list
+
     out: dict[str, list[Any]] = {"candidates": [], "labels": [], "weights": [], "contexts": []}
     columns = set(getattr(frame, "columns", ()))
     for row in frame.itertuples(index=False):
-        items = list(getattr(row, "candidates", ()) or ())
-        flags = [float(x) for x in (getattr(row, "labels", ()) or ())]
+        items = as_item_list(getattr(row, "candidates", None))
+        flags = [float(x) for x in as_item_list(getattr(row, "labels", None))]
         if len(items) < 2 or len(flags) != len(items) or not any(f > 0 for f in flags):
             continue
         weights = (
-            [float(x) for x in (getattr(row, "weights", ()) or ())]
+            [float(x) for x in as_item_list(getattr(row, "weights", None))]
             if "weights" in columns
             else []
         )

@@ -757,3 +757,31 @@ def test_lightgbm_gets_ndcg_and_eval_at_when_the_fit_spec_says_ndcg_at_4(stub_ba
 
     params = stub_backend.calls[-1]["params"]
     assert params["metric"] == "ndcg" and params["eval_at"] == [4]
+
+
+def test_a_fit_survives_the_array_columns_spark_actually_hands_over(stub_backend):
+    """Spark -> pandas yields numpy arrays, whose truth value is ambiguous.
+
+    The second real LFY training job died on `candidates or ()`. Every fixture
+    above uses Python lists, which is why nothing caught it; this one uses what
+    `to_pandas` produces.
+    """
+    from amt.jobs.models import tabular_common
+
+    frame = _rendered_with_context(6)
+    for column in ("candidates", "positions", "labels", "weights"):
+        frame[column] = [np.asarray(v, dtype=object if column == "candidates" else float) for v in frame[column]]
+
+    model = tabular_common.fit_family(
+        "lightgbm_classifier",
+        frame,
+        frame.iloc[:3],
+        {"feature_recipe": CONTEXT_RECIPE, "fit_spec": {"num_boost_round": 4}},
+    )
+
+    assert len(stub_backend.calls[-1]["group_sizes"]) == 6
+    eval_frame = build_eval_frame(frame)
+    ranked = model.recommend(
+        eval_frame.histories, 3, candidates=eval_frame.candidates, contexts=eval_frame.contexts
+    )
+    assert all(sorted(r) == sorted(c) for r, c in zip(ranked, eval_frame.candidates, strict=True))
