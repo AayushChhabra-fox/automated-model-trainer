@@ -79,7 +79,9 @@ tells you exactly what you give up rather than refusing:
 - An `amt=true` **cluster tag** makes its cost attributable to AMT in
   `system.billing.usage.custom_tags`. Per-run attribution (`amt_campaign_id`,
   `amt_role`, `amt_hypothesis_id`) cannot work on a shared cluster.
-- It bills at the All-Purpose rate, roughly twice Jobs Compute.
+- It bills at the All-Purpose rate. Measured on this workspace, that is
+  $0.650/DBU against $0.200 for Jobs Compute — **3.25×**, not the "about twice"
+  rule of thumb.
 - If its runtime is not an **ML** runtime, the booster families get
   pip-installed on every run and the installs pile up; run
   `scripts/clear_cluster_wheels.py` when they do.

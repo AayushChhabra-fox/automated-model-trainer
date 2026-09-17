@@ -570,7 +570,10 @@ def _existing_cluster_report(settings: Any, cluster_id: str) -> str:
         "live on a shared cluster, so cost is not attributable per campaign, "
         "role or hypothesis"
     )
-    notes.append("- billed as All-Purpose, roughly twice the Jobs Compute rate")
+    notes.append(
+        "- billed as All-Purpose: measured at 3.25x the Jobs Compute rate on this "
+        "workspace ($0.650 vs $0.200 per DBU)"
+    )
 
     if "-ml-" not in runtime:
         notes.append(

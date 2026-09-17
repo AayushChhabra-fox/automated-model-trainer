@@ -142,26 +142,41 @@ START → problem_spec → [interrupt HC2] ─rejected→ problem_spec
                             ─rejected→ evaluation_contract
                             └approved→ run_baseline → planner_hypotheses
 planner_hypotheses → [interrupt HC_BACKLOG] ─rejected→ planner_hypotheses
-                                            └approved→ planner_select_hypothesis
-planner_select_hypothesis ─no hypotheses left / budget→ planner_final_champion
-                          ─tabular family, shape not approved→ planner_feature_fit
-                          └→ trainer_propose → execute_training → trainer_interpret
+                    └approved─any tabular hypothesis→ planner_feature_fit
+                             └none tabular→ planner_select_hypothesis
 planner_feature_fit → [interrupt HC_FEATURE] ─rejected→ planner_feature_fit
-                                             └approved→ trainer_propose
-trainer_propose ─feature_fit_hash != approved→ planner_feature_fit
+   (all tabular hypotheses    └approved→ planner_select_hypothesis
+    in one payload)
+planner_select_hypothesis ─no hypotheses left / budget / frozen→ planner_final_champion
+                          └→ trainer_propose → execute_training → trainer_interpret
 trainer_interpret ─continue→ trainer_propose
-                  └converged→ select_hypothesis_champion → planner_select_hypothesis
+                  └converged→ select_hypothesis_champion → hc_champion
+hc_champion → [interrupt HC_CHAMPION] ─continue→ planner_select_hypothesis
+                                      └freeze→ planner_final_champion
 planner_final_champion → freeze_champion → qa_phase0
-qa_phase0 ─INVALID_EXPERIMENT (fixable, attempts<3)→ qa_phase0
+qa_phase0 ─INVALID_EXPERIMENT (fixable, attempts < settings.phase0_max_attempts)→ qa_phase0
           └pass→ qa_phase1 → qa_decision → conclusion → log_final_mlflow → [interrupt HC4] → END
 qa_decision = SPEC_REVIEW → conclusion (status=spec_review) → [interrupt HC4] → END
 ```
+
+Two edges that used to exist and deliberately do not: `trainer_propose → planner_feature_fit`
+(the Trainer's structural ask is now clamped in `_bind_feature_fit`, not routed) and
+`planner_select_hypothesis → planner_feature_fit` (every shape is approved before selection,
+so a tabular family reaching selection without one is a bug and raises rather than routes).
+
+`graph.update_state(..., as_node=...)` is the one write that re-enters an earlier node:
+`amt.graph.human.rewind_update` returns the node to re-enter and the state to clear, and the
+CLI's `amt rewind` and the web surface's `/c/<id>/rewind` both go through it. Rewind targets
+are `backlog` → `run_baseline`, `feature` → `hc_hypotheses`, `qa` → `freeze_champion`; the
+first two are refused once a champion is frozen.
 
 Rules enforced in `routing.py`, not prompts: trainer loop cannot exceed `plan.max_iterations`; `execute_training` refuses if `contract_hash` differs from the one stamped at HC3; `qa_*` refuses if `frozen_champion is None` or more than one champion; `execute_training` refuses a booster family whose `feature_fit_hash` is not the one approved at HC_FEATURE.
 
 HC_BACKLOG gates the hypothesis backlog: the Planner writes it once, after the baseline, and no hypothesis is planned until a human approves the list. A rejection revises the backlog with the feedback (hypotheses the feedback did not object to survive intact); approval happens once per campaign, not once per hypothesis. `planner_select_hypothesis` never generates hypotheses, so there is no path into training that skips the gate.
 
-HC_FEATURE gates the declarative feature/fit shape of the booster families: one approval per hypothesis, hyperparameter-only iterations run unattended, and any structural change to the `FeatureRecipe` or `FitSpec` re-enters the checkpoint. `popularity` and `sasrec` skip it.
+HC_FEATURE gates the declarative feature/fit shape of the booster families, **batched**: `planner_feature_fit` loops over every pending tabular hypothesis and the gate interrupts once, carrying `feature_fit_proposals: dict[str, FeatureFitProposal]` and priced candidate-row estimates for all of them. It is skipped entirely when no approved hypothesis is tabular, and `planner_feature_fit_node` raises on an empty tabular set rather than interrupting on an empty dict. Approval stores `approved_shapes: dict[str, ApprovedShape]`; `planner_select_hypothesis` copies the selected hypothesis's shape into `approved_feature_recipe` / `approved_fit_spec` / `feature_fit_hash`, so `assert_feature_fit_approved` and `execute_training` are unchanged. Hyperparameter-only iterations run unattended. A structural change requested by the Trainer is **clamped**: `_bind_feature_fit` keeps the approved structural payload, takes only `booster_params`, inherits approved `objective` / `eval_metric` when the Trainer sends blanks, and records the rejected ask in `structural_asks_clamped` for `describe()` to report. `popularity`, `sasrec` and `logged_order` skip the gate.
+
+HC_CHAMPION gates each hypothesis's champion, between `select_hypothesis_champion` and the next selection. It carries the champion against the baseline and every prior champion on the primary and secondary metrics, cohort deltas, remaining budget, and the recommended next move. Verbs: `continue` (default), `freeze` (skip the remaining hypotheses, route to `planner_final_champion`), `drop` (abandon named hypotheses). `--no-gate-champions` disables it for rehearsal campaigns. This is what "autonomous within a hypothesis" means in the graph: the loop between `trainer_propose` and `trainer_interpret` is unattended, and its exit is a checkpoint.
 
 ## 5. Executor contract
 
@@ -182,7 +197,9 @@ A job runs on a cluster with no AMT settings and no access to the prose a human 
 
 ## 6. Evaluation harness
 
-Single implementation in `jobs/eval/harness.py`, `HARNESS_VERSION = "1.0.0"` recorded in the EvaluationContract and asserted by both train and QA jobs. Metrics: Recall@K, NDCG@K, HitRate@K, MRR, item coverage. Inputs: per-user ranked item list + ground-truth set; cohort labels optional. `paired.py`: per-user metric deltas, paired bootstrap 95% CI, fraction of users improved.
+Single implementation in `jobs/eval/harness.py`, `HARNESS_VERSION` recorded in the EvaluationContract and asserted by both train and QA jobs. Metrics: Recall@K, NDCG@K, HitRate@K, MRR, item coverage, plus `binary_metrics` (AUC, PR-AUC, log loss, ECE) as secondaries. Inputs: a ranked item list plus a ground-truth set **per unit**, where a unit is a user under `next_item` and a render under `grouped_rerank` — the harness does not know the difference, which is why the second mode needed no second harness. `evaluate()` takes an optional `gains` argument: under `relevance_weighting: pbm`, NDCG uses the per-item weight as its gain and HitRate / Recall / MRR count a weighted hit. `paired.py`: per-unit metric deltas, paired bootstrap 95% CI computed in chunks so a container-scale split does not materialise one giant resample array, fraction of units improved, rank correlation, top-slot conversion estimates and A/B sizing.
+
+Metric names do not vary by mode: `ndcg@4` is `ndcg@4` weighted or not. The weighting is a contract field stamped into `contract_hash`, so baseline, candidates and QA cannot disagree about it. `k` comes from the contract's own `MetricDef` names rather than a default, so a contract asking for `ndcg@4` is scored at 4.
 
 QA independence: QA job runs `qa.py` which loads the model via MLflow pyfunc (not the trainer's in-memory object) and computes metrics through the harness — same math, different code path for inference.
 
@@ -191,26 +208,52 @@ QA independence: QA job runs `qa.py` which loads the model via MLflow pyfunc (no
 - One experiment per campaign: `/Shared/amt/{campaign_id}`.
 - Tags on every run: `amt.campaign_id`, `amt.stage`, `amt.role` (baseline|train|qa0|qa1|final), `amt.hypothesis_id`, `amt.contract_hash`, `amt.spec_hash`, `amt.harness_version`, `amt.config_hash`, `amt.code_version` (git sha).
 - Train runs log: params (flattened config), metrics (`train/*`, `val/*`, `val/cohort/*`), artifacts (`model/` pyfunc, `config.yaml`, `result.json`).
-- Final run (Stage 12): re-logs frozen model reference, QA metrics, baseline deltas, `conclusion.md`, `problem_spec.json`, `evaluation_contract.json`. Optionally registers to UC model registry `{catalog}.{schema}.{model_name}` with alias `candidate` when QA=PASS.
+- Final run (Stage 12): re-logs frozen model reference, QA metrics, baseline deltas, `conclusion.md`, `report.html` (the rendered `ExperimentationReport`), `problem_spec.json`, `evaluation_contract.json`. Optionally registers to UC model registry `{catalog}.{schema}.{model_name}` with alias `candidate` when QA=PASS.
+- Cluster tags on every submitted job: `amt=true`, `amt_campaign_id`, `amt_role`, `amt_hypothesis_id`, landing in `system.billing.usage.custom_tags`. These are a property of a *job* cluster and are inert on a pinned all-purpose cluster — see `.cursor/rules/databricks-cost.md`.
 
-## 8. Human checkpoints (CLI)
+## 8. Human checkpoints and the two surfaces
+
+Seven interrupts: HC2 (spec), HC3 (contract), HC_BACKLOG, HC_FEATURE, HC_CHAMPION (once per
+hypothesis), HC4 (conclusion), with HC1 being the problem text itself. Each is an
+`interrupt()` carrying a payload; each is answered with `Command(resume=payload)` parsed by
+`amt.graph.human.parse_resume` into a `HumanDecision` with `approved`, `feedback`, `keep`,
+`drop`, `freeze` and `decision`.
+
+**Both surfaces read through `amt.monitor` and write through that same resume**, so they
+cannot disagree about a campaign. `monitor` is pure functions of `(graph, campaign_id)` — no
+Rich, no Typer, no Flask — holding `state`, `pending_interrupt`, `list_campaigns`,
+`checkpoint_document`, the per-checkpoint row builders (`backlog_rows`, `shape_rows`,
+`champion_rows`, `conclusion_rows`), `report_rows` and `rewind_targets`.
+
+`src/amt/web/` is the primary surface: `app.py` routes, `runner.py` one thread per campaign
+guarded by a per-campaign lock (a second resume while one is live returns 409), and
+server-rendered templates with a five-second meta refresh only while a runner is live. It
+binds to 127.0.0.1 with the operator's `.env` and adds no auth. `rewind_targets` decides
+which rewinds to offer by *calling* `rewind_update` and catching its refusal, so the offered
+buttons cannot drift from what the action permits.
 
 ```
-amt start "Improve homepage row ranking for Tubi..." --campaign my-campaign
+amt web                            # the campaign list, campaign pages, reports
+amt doctor --tables a,b            # auth, warehouse, volume, cluster spec, MLflow, LLM
+amt config                         # resolved settings, masked, with each value's source
+
+amt start "Improve homepage row ranking..." --campaign my-campaign
    → runs to HC2, prints ProblemSpec, exits with "awaiting approval"
-amt approve my-campaign            # resumes; runs to HC3
+amt run my-campaign                # or drive every checkpoint inline from one terminal
+amt approve my-campaign [--keep H1,H3] [--drop H2]
 amt reject my-campaign -m "use 30-day label window"   # feeds back, re-runs stage
-amt approve my-campaign            # resumes; baseline, then stops at HC_BACKLOG
-   → the whole hypothesis backlog, once per campaign; reject to have it revised
-amt approve my-campaign            # resumes; autonomous until HC4
-   → booster families stop once more at HC_FEATURE with the proposed
-     FeatureRecipe + FitSpec; approve / reject the same way
+amt show my-campaign [--key K]     # the checkpoint document in full
+amt rewind my-campaign --to backlog|feature|qa -m "<why>"
 amt status my-campaign
+amt list
 amt report my-campaign             # prints ScientificConclusion, MLflow links
 amt promote my-campaign            # HC4 decision: registers model alias
 ```
 
-Checkpointer DB at `~/.amt/checkpoints.sqlite`; thread_id = campaign_id.
+Checkpointer DB at `~/.amt/checkpoints.sqlite`; thread_id = campaign_id. The saver uses
+`JsonPlusSerializer(allowed_msgpack_modules=[...])` listing the `amt.schemas.*` modules, and
+the connection sets `PRAGMA busy_timeout=5000` because the web process reads the same
+database while a runner writes it.
 
 ## 9. Enforcement mechanisms (beyond prompts)
 
@@ -222,9 +265,60 @@ Checkpointer DB at `~/.amt/checkpoints.sqlite`; thread_id = campaign_id.
 6. Harness version pinned in contract; jobs assert.
 7. The backlog reaches the Trainer only through HC_BACKLOG: `planner_select_hypothesis` raises rather than inventing hypotheses when state carries none.
 8. `feature_fit_hash` approved at HC_FEATURE; `execute_training` asserts equality, and the booster runtime accepts only the closed transform vocabulary (no SQL, no agent-authored Python) and never a `qa` source.
-9. Optional (documented in README): second SP for QA jobs with grants only on `split_qa`.
+9. The Trainer cannot change an approved shape: `_bind_feature_fit` clamps rather than routes, and records the rejected ask.
+10. A hypothesis outside the runtime vocabulary is marked `infeasible` by the graph and never reaches selection; one a human drops is `abandoned` and is not resurrected by a rewind.
+11. Proxy sanity precedes candidate metrics in the QA Phase 1 job, and a failure routes to `SPEC_REVIEW` before any candidate number is read.
+12. The conclusion's `recommendation` is clamped to `validation_verdict`: a champion that did not beat the incumbent reads `hypothesis_rejected` regardless of the narrative. The verdict resolves the baseline through `metric_value`, which tolerates the `val/` prefix that `train.py` logs under — a raw lookup across that gap silently reported every champion as losing.
+13. Rewinding into training is refused once a champion is frozen (`rewind_update` raises); only `--to qa` remains, and it clears QA's own results without touching the artifact.
+14. Optional (documented in README): second SP for QA jobs with grants only on `split_qa`.
 
-## 10. Implementation phases (Opus)
+## 10. Swapping an agent
+
+Each agent method is a pure function from a context dict to exactly one Pydantic schema,
+built by `AgentBase.agent(key, prompt_name, schema)`. The prompt is swappable, the returned
+schema is the contract, and `graph/routing.py` plus the node assertions are what make a bad
+swap fail loudly instead of quietly producing a worse campaign. Models are named
+`provider:model_id` and built only in `src/amt/llm.py`; nothing else may import a provider SDK.
+
+Prompts live in `src/amt/agents/prompts/`. The table below is verified against the source —
+note `planner_final_champion.md` (not `planner_champion.md`) and `qa_phase0_triage.md` /
+`qa_decision.md` (not `qa_triage.md` / `qa_decide.md`).
+
+| Agent method | Prompt | Must return | Model env var |
+|---|---|---|---|
+| `ProblemSpecAgent.investigate` | `problem_spec_probe.md` | `ProbeRequest` | `AMT_PROBLEM_SPEC_MODEL` |
+| `ProblemSpecAgent.draft_spec` | `problem_spec.md` | `ProblemSpec` | `AMT_PROBLEM_SPEC_MODEL` |
+| `ProblemSpecAgent.draft_contract` | `evaluation_contract.md` | `EvaluationContractDraft` | `AMT_PROBLEM_SPEC_MODEL` |
+| `PlannerAgent.propose_hypotheses` | `planner_hypotheses.md` | `HypothesisBacklog` | `AMT_PLANNER_MODEL` |
+| `PlannerAgent.propose_feature_fit` | `planner_feature_fit.md` | `FeatureFitProposal` | `AMT_PLANNER_MODEL` |
+| `PlannerAgent.build_plan` | `planner_plan.md` | `ExperimentPlan` | `AMT_PLANNER_MODEL` |
+| `PlannerAgent.select_final_champion` | `planner_final_champion.md` | `FinalChampionSelection` | `AMT_PLANNER_MODEL` |
+| `PlannerAgent.write_conclusion` | `planner_conclusion.md` | `ScientificConclusion` | `AMT_PLANNER_MODEL` |
+| `TrainerAgent.propose_config` | `trainer_propose.md` | `ExperimentConfig` | `AMT_TRAINER_MODEL` |
+| `TrainerAgent.interpret` | `trainer_interpret.md` | `TrainerInterpretation` | `AMT_TRAINER_MODEL` |
+| `TrainerAgent.select_champion` | `trainer_champion.md` | `ChampionSelection` | `AMT_TRAINER_MODEL` |
+| `QAAgent.triage_phase0` | `qa_phase0_triage.md` | `Phase0Triage` | `AMT_QA_MODEL` |
+| `QAAgent.decide` | `qa_decision.md` | `QAAssessment` | `AMT_QA_MODEL` |
+
+`Settings.model_for(agent)` resolves the four keys (`planner`, `trainer`, `qa`,
+`problem_spec`) and falls back to the planner's model for anything unrecognised.
+
+Three things a prompt swap cannot do, because code and not the prompt decides them:
+
+- **It cannot widen the vocabulary.** `runtime_vocabulary()` is rendered into the Planner's
+  context, and a hypothesis or recipe outside it is marked `infeasible` or rejected by
+  `FeatureRecipe` validation. A prompt that invents a transform produces a caught error, not
+  a new capability.
+- **It cannot change an approved shape.** `_bind_feature_fit` keeps the structural payload a
+  human signed and takes only `booster_params`, whatever the Trainer returns.
+- **It cannot upgrade a losing result.** `conclusion_node` clamps `recommendation` to the
+  measured `validation_verdict`.
+
+Swapping the *executor* is the same shape of change: implement the five-method `Executor`
+protocol (§5). `LocalMockExecutor` and `FakeLLM` in `tests/conftest.py` are the reference
+implementations, and the integration test drives the whole graph through both.
+
+## 11. Implementation phases (Opus)
 
 - **Phase A — core**: pyproject, settings, schemas, state, databricks clients, mlflow helpers, executor protocol + LocalMockExecutor, unit tests for schemas/hashing.
 - **Phase B — orchestration**: agents (prompts + structured output), nodes, routing, build_graph, CLI, integration test with fake LLM + mock executor covering: approve/reject loops, trainer convergence, freeze, QA pass/fail/spec_review paths.

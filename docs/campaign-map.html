@@ -88,7 +88,7 @@ ol.rules b{color:var(--ink);font-weight:600}
 <div class="page">
   <span class="eyebrow">Automated Model Trainer · campaign anatomy</span>
   <h1>One hypothesis, one frozen champion, one honest answer</h1>
-  <p class="lede">A campaign moves across three lanes: the human who owns the decision, the agents running in the local CLI, and Databricks doing every unit of compute. Four checkpoints belong to the human; everything between the third and fourth runs on its own inside the agreed budget.</p>
+  <p class="lede">A campaign moves across three lanes: the human who owns the decision, the agents running in a local LangGraph process, and Databricks doing every unit of compute. Seven checkpoints belong to the human. Only one stretch runs unattended &mdash; the Trainer loop inside a single hypothesis &mdash; and it ends at a review of that hypothesis's champion.</p>
 
   <div class="legend">
     <span><i class="sw" style="background:var(--human-bg);border-color:var(--human)"></i>Human checkpoint</span>
@@ -98,7 +98,7 @@ ol.rules b{color:var(--ink);font-weight:600}
   </div>
 
   <figure>
-    <svg viewBox="0 0 980 1190" role="img" aria-label="Swimlane diagram of an AMT campaign across Human, Agents, and Databricks lanes, from product problem through ProblemSpec and EvaluationContract approvals, the trainer loop on train and validation splits, champion freeze, QA phases 0 and 1 on the sealed QA split, to the scientific conclusion and promotion decision.">
+    <svg viewBox="0 0 980 1448" role="img" aria-label="Swimlane diagram of an AMT campaign across Human, Agents and Databricks lanes: product problem, ProblemSpec and EvaluationContract approvals, the incumbent baseline, one batched hypothesis-backlog and feature-shape review, the autonomous trainer loop within a single hypothesis, a champion review per hypothesis, champion freeze, QA phases 0 and 1 on the sealed QA split behind a proxy-sanity gate, and the conclusion with its experimentation report.">
       <defs>
         <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
         <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--human)"/></marker>
@@ -108,14 +108,14 @@ ol.rules b{color:var(--ink);font-weight:600}
 
       <text class="lane" x="115" y="28" text-anchor="middle">Human</text>
       <text class="sub" x="115" y="44" text-anchor="middle">owns the decision</text>
-      <text class="lane" x="440" y="28" text-anchor="middle">Agents · local CLI</text>
+      <text class="lane" x="440" y="28" text-anchor="middle">Agents · local graph</text>
       <text class="sub" x="440" y="44" text-anchor="middle">LangGraph, checkpointed in SQLite</text>
       <text class="lane" x="810" y="28" text-anchor="middle">Databricks</text>
-      <text class="sub" x="810" y="44" text-anchor="middle">jobs run as the service principal</text>
-      <line class="lane-rule" x1="230" y1="56" x2="230" y2="1180"/>
-      <line class="lane-rule" x1="650" y1="56" x2="650" y2="1180"/>
+      <text class="sub" x="810" y="44" text-anchor="middle">job clusters, tagged for cost</text>
+      <line class="lane-rule" x1="230" y1="56" x2="230" y2="1438"/>
+      <line class="lane-rule" x1="650" y1="56" x2="650" y2="1438"/>
 
-      <!-- Row 1 -->
+      <!-- HC1 · the product problem -->
       <rect class="hc" x="20" y="72" width="190" height="52" rx="4"/>
       <text class="hc-t" x="115" y="94" text-anchor="middle">HC1 · Product problem</text>
       <text class="sub" x="115" y="112" text-anchor="middle">natural language</text>
@@ -131,126 +131,177 @@ ol.rules b{color:var(--ink);font-weight:600}
       <text class="dbx-t" x="810" y="94" text-anchor="middle" font-weight="600">Unity Catalog tables</text>
       <text class="sub" x="810" y="112" text-anchor="middle">SQL warehouse, SELECT only</text>
 
-      <!-- Row 2 -->
+      <!-- HC2 · the spec -->
       <path class="edge" d="M440 124 V158" marker-end="url(#a)"/>
       <rect class="box" x="335" y="162" width="210" height="40" rx="4"/>
       <text class="mono" x="440" y="187" text-anchor="middle">ProblemSpec</text>
       <path class="edge-h" d="M335 182 H215" marker-end="url(#ah)"/>
       <rect class="hc" x="20" y="156" width="190" height="52" rx="4"/>
       <text class="hc-t" x="115" y="178" text-anchor="middle">HC2 · Approve spec</text>
-      <text class="sub" x="115" y="196" text-anchor="middle">amt approve · amt reject -m</text>
+      <text class="sub" x="115" y="196" text-anchor="middle">campaign page · amt approve</text>
       <path class="edge-h loop" d="M60 156 V140 H300 V128" marker-end="url(#ah)"/>
       <text class="lbl" x="170" y="136" text-anchor="middle">reject → feedback → redraft</text>
 
-      <!-- Row 3 -->
+      <!-- the contract -->
       <path class="edge" d="M440 202 V236" marker-end="url(#a)"/>
       <rect class="box" x="290" y="240" width="300" height="52" rx="4"/>
       <text x="440" y="262" text-anchor="middle" font-weight="600">Evaluation Contract</text>
-      <text class="sub" x="440" y="280" text-anchor="middle">splits · population · labels · metrics · harness v1.0.0</text>
+      <text class="sub" x="440" y="280" text-anchor="middle">splits · labels · metrics · evaluation_mode</text>
       <path class="edge-d" d="M590 266 H700" marker-end="url(#ad)"/>
       <text class="lbl" x="645" y="258" text-anchor="middle">materialize</text>
       <rect class="dbx" x="705" y="240" width="210" height="52" rx="4"/>
       <text class="dbx-t" x="810" y="262" text-anchor="middle" font-weight="600">Frozen Delta splits</text>
       <text class="sub" x="810" y="280" text-anchor="middle">train · validation · qa @ version</text>
 
-      <!-- Row 4 -->
+      <!-- HC3 · the contract hash -->
       <path class="edge" d="M440 292 V326" marker-end="url(#a)"/>
       <rect class="box" x="335" y="330" width="210" height="40" rx="4"/>
       <text class="mono" x="440" y="355" text-anchor="middle">contract_hash</text>
       <path class="edge-h" d="M335 350 H215" marker-end="url(#ah)"/>
       <rect class="hc" x="20" y="324" width="190" height="52" rx="4"/>
       <text class="hc-t" x="115" y="346" text-anchor="middle">HC3 · Approve contract</text>
-      <text class="sub" x="115" y="364" text-anchor="middle">ground truth frozen for the campaign</text>
+      <text class="sub" x="115" y="364" text-anchor="middle">frozen for the whole campaign</text>
       <path class="edge-h loop" d="M60 324 V308 H300 V296" marker-end="url(#ah)"/>
 
-      <!-- autonomous band -->
-      <rect x="240" y="392" width="730" height="726" rx="6" fill="none" stroke="var(--rule)" stroke-width="1"/>
-      <text class="sub" x="255" y="410">AUTONOMOUS · within iteration and compute budget · every step asserts contract_hash</text>
-
-      <!-- Row 5 -->
+      <!-- the incumbent -->
       <path class="edge" d="M440 370 V424" marker-end="url(#a)"/>
-      <rect class="box" x="290" y="428" width="300" height="40" rx="4"/>
-      <text x="440" y="453" text-anchor="middle">Run baseline on validation</text>
-      <path class="edge-d" d="M590 448 H700" marker-end="url(#ad)"/>
-      <rect class="dbx" x="705" y="428" width="210" height="40" rx="4"/>
-      <text class="dbx-t" x="810" y="453" text-anchor="middle">popularity baseline → MLflow</text>
+      <rect class="box" x="290" y="428" width="300" height="52" rx="4"/>
+      <text x="440" y="450" text-anchor="middle" font-weight="600">Run the baseline</text>
+      <text class="sub" x="440" y="468" text-anchor="middle">the incumbent, on the same ground truth</text>
+      <path class="edge-d" d="M590 454 H700" marker-end="url(#ad)"/>
+      <rect class="dbx" x="705" y="428" width="210" height="52" rx="4"/>
+      <text class="dbx-t" x="810" y="450" text-anchor="middle" font-weight="600">Baseline job</text>
+      <text class="sub" x="810" y="468" text-anchor="middle">popularity · sasrec · logged_order</text>
 
-      <!-- Row 6 -->
-      <path class="edge" d="M440 468 V502" marker-end="url(#a)"/>
-      <rect class="box" x="290" y="506" width="300" height="52" rx="4"/>
-      <text x="440" y="528" text-anchor="middle" font-weight="600">Experiment Planner</text>
-      <text class="sub" x="440" y="546" text-anchor="middle">falsifiable Hypothesis → ExperimentPlan (bounds, budget)</text>
+      <!-- HC_BACKLOG · the ideas, written once -->
+      <path class="edge" d="M440 480 V514" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="518" width="300" height="52" rx="4"/>
+      <text x="440" y="540" text-anchor="middle" font-weight="600">Hypothesis Backlog</text>
+      <text class="sub" x="440" y="558" text-anchor="middle">written once · outside the vocabulary → infeasible</text>
+      <path class="edge-h" d="M290 544 H215" marker-end="url(#ah)"/>
+      <rect class="hc" x="20" y="518" width="190" height="52" rx="4"/>
+      <text class="hc-t" x="115" y="540" text-anchor="middle">HC_BACKLOG · the ideas</text>
+      <text class="sub" x="115" y="558" text-anchor="middle">keep · drop → abandoned</text>
 
-      <!-- Row 7 -->
-      <path class="edge" d="M440 558 V592" marker-end="url(#a)"/>
-      <rect class="box" x="290" y="596" width="300" height="64" rx="4"/>
-      <text x="440" y="618" text-anchor="middle" font-weight="600">Trainer Agent</text>
-      <text class="sub" x="440" y="634" text-anchor="middle">Observation → Interpretation → Change → Expected effect</text>
-      <text class="mono" x="440" y="650" text-anchor="middle">ExperimentConfig</text>
-      <path class="edge-d" d="M590 616 H700" marker-end="url(#ad)"/>
-      <text class="lbl" x="645" y="608" text-anchor="middle">submit wheel job</text>
-      <path class="edge-d" d="M700 644 H590" marker-end="url(#ad)"/>
-      <text class="mono lbl" x="645" y="662" text-anchor="middle">TrainingRunResult</text>
-      <rect class="dbx" x="705" y="596" width="210" height="64" rx="4"/>
-      <text class="dbx-t" x="810" y="618" text-anchor="middle" font-weight="600">Training job</text>
-      <text class="sub" x="810" y="634" text-anchor="middle">SplitGuard: train + validation only</text>
-      <text class="sub" x="810" y="650" text-anchor="middle">params · metrics · model → MLflow</text>
-      <path class="edge loop" d="M290 640 H262 V606 H285" marker-end="url(#a)"/>
-      <text class="lbl" x="258" y="678" text-anchor="start">iterate until: success · plateau · budget · falsified</text>
+      <!-- HC_FEATURE · every shape, once -->
+      <path class="edge" d="M440 570 V604" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="608" width="300" height="52" rx="4"/>
+      <text x="440" y="630" text-anchor="middle" font-weight="600">Feature &amp; Fit Shapes</text>
+      <text class="sub" x="440" y="648" text-anchor="middle">every tabular shape at once · rows priced</text>
+      <path class="edge-h" d="M290 634 H215" marker-end="url(#ah)"/>
+      <rect class="hc" x="20" y="608" width="190" height="52" rx="4"/>
+      <text class="hc-t" x="115" y="630" text-anchor="middle">HC_FEATURE · the shapes</text>
+      <text class="sub" x="115" y="648" text-anchor="middle">one review, then final</text>
+      <text class="lbl" x="440" y="678" text-anchor="middle">skipped entirely when no hypothesis is tabular</text>
 
-      <!-- Row 8 -->
-      <path class="edge" d="M440 660 V694" marker-end="url(#a)"/>
-      <rect class="box" x="290" y="698" width="300" height="52" rx="4"/>
-      <text x="440" y="720" text-anchor="middle" font-weight="600">Hypothesis Champion</text>
-      <text class="sub" x="440" y="738" text-anchor="middle">one config per hypothesis, guardrails over raw metric</text>
-      <path class="edge loop" d="M590 724 H620 V532 H595" marker-end="url(#a)"/>
-      <text class="lbl" x="632" y="628" text-anchor="middle" transform="rotate(90 632 628)">next hypothesis</text>
+      <!-- selection, under an already-approved shape -->
+      <path class="edge" d="M440 686 V714" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="718" width="300" height="40" rx="4"/>
+      <text x="440" y="743" text-anchor="middle">Select hypothesis · build plan</text>
 
-      <path class="edge" d="M440 750 V784" marker-end="url(#a)"/>
-      <rect class="box" x="290" y="788" width="300" height="52" rx="4" stroke-width="2"/>
-      <text x="440" y="810" text-anchor="middle" font-weight="600">Champion Freeze</text>
-      <text class="mono sub" x="440" y="828" text-anchor="middle">FrozenChampion · immutable · exactly one</text>
+      <!-- the autonomous band is one hypothesis wide -->
+      <rect x="240" y="774" width="730" height="188" rx="6" fill="none" stroke="var(--rule)" stroke-width="1"/>
+      <text class="sub" x="255" y="792">AUTONOMOUS WITHIN ONE HYPOTHESIS · iteration and compute budget · every step asserts contract_hash</text>
 
-      <!-- Row 9 -->
-      <path class="edge-q" d="M440 840 V874" marker-end="url(#aq)"/>
-      <rect class="qa" x="290" y="878" width="300" height="52" rx="4"/>
-      <text class="qa-t" x="440" y="900" text-anchor="middle" font-weight="600">QA Phase 0 · Integrity</text>
-      <text class="sub" x="440" y="918" text-anchor="middle">artifact loads, schema, reproduces logged validation</text>
-      <path class="edge-q" d="M590 904 H700" marker-end="url(#aq)"/>
-      <rect class="dbx" x="705" y="878" width="210" height="52" rx="4"/>
-      <text class="dbx-t" x="810" y="900" text-anchor="middle">Integrity job</text>
-      <text class="sub" x="810" y="918" text-anchor="middle">validation subset only · pyfunc load</text>
-      <path class="edge-q loop" d="M290 916 H262 V890 H285" marker-end="url(#aq)"/>
-      <text class="lbl" x="258" y="948" text-anchor="start">INVALID_EXPERIMENT → fix plumbing, never the model · ≤3 tries</text>
+      <path class="edge" d="M440 758 V800" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="804" width="300" height="64" rx="4"/>
+      <text x="440" y="824" text-anchor="middle" font-weight="600">Trainer Agent</text>
+      <text class="sub" x="440" y="840" text-anchor="middle">Observation → Interpretation → Change → Expected effect</text>
+      <text class="mono" x="440" y="858" text-anchor="middle">ExperimentConfig · booster params only</text>
+      <path class="edge-d" d="M590 822 H700" marker-end="url(#ad)"/>
+      <text class="lbl" x="645" y="814" text-anchor="middle">submit wheel job</text>
+      <path class="edge-d" d="M700 852 H590" marker-end="url(#ad)"/>
+      <text class="mono lbl" x="645" y="870" text-anchor="middle">TrainingRunResult</text>
+      <rect class="dbx" x="705" y="804" width="210" height="64" rx="4"/>
+      <text class="dbx-t" x="810" y="824" text-anchor="middle" font-weight="600">Training job</text>
+      <text class="sub" x="810" y="840" text-anchor="middle">SplitGuard: train + validation only</text>
+      <text class="sub" x="810" y="858" text-anchor="middle">job cluster · amt* cost tags</text>
+      <path class="edge loop" d="M290 848 H262 V814 H285" marker-end="url(#a)"/>
+      <text class="lbl" x="248" y="888" text-anchor="start">iterate until: success · plateau · budget · falsified · no_op</text>
 
-      <!-- Row 10 -->
-      <path class="edge-q" d="M440 930 V964" marker-end="url(#aq)"/>
-      <rect class="qa" x="290" y="968" width="300" height="52" rx="4"/>
-      <text class="qa-t" x="440" y="990" text-anchor="middle" font-weight="600">QA Phase 1 · Holdout</text>
-      <text class="sub" x="440" y="1008" text-anchor="middle">candidate vs baseline, paired per-user deltas + bootstrap CI</text>
-      <path class="edge-q" d="M590 994 H700" marker-end="url(#aq)"/>
-      <rect class="qa" x="705" y="968" width="210" height="52" rx="4"/>
-      <text class="qa-t" x="810" y="990" text-anchor="middle" font-weight="600">Holdout job</text>
-      <text class="sub" x="810" y="1008" text-anchor="middle">SplitGuard: qa only · first and only read</text>
+      <path class="edge" d="M440 868 V896" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="900" width="300" height="52" rx="4"/>
+      <text x="440" y="922" text-anchor="middle" font-weight="600">Hypothesis Champion</text>
+      <text class="sub" x="440" y="940" text-anchor="middle">one config per hypothesis · guardrails over raw metric</text>
 
-      <!-- Row 11 -->
-      <path class="edge" d="M440 1020 V1054" marker-end="url(#a)"/>
-      <rect class="box" x="290" y="1058" width="300" height="52" rx="4"/>
-      <text x="440" y="1080" text-anchor="middle" font-weight="600">Scientific Conclusion</text>
-      <text class="sub" x="440" y="1098" text-anchor="middle">PASS · FAIL_HYPOTHESIS · SPEC_REVIEW — a negative result counts</text>
-      <path class="edge-d" d="M590 1084 H700" marker-end="url(#ad)"/>
-      <rect class="dbx" x="705" y="1058" width="210" height="52" rx="4"/>
-      <text class="dbx-t" x="810" y="1080" text-anchor="middle">Final MLflow run</text>
-      <text class="sub" x="810" y="1098" text-anchor="middle">model · QA metrics · lineage · report</text>
-      <path class="edge-h" d="M290 1084 H215" marker-end="url(#ah)"/>
-      <rect class="hc" x="20" y="1058" width="190" height="52" rx="4"/>
-      <text class="hc-t" x="115" y="1080" text-anchor="middle">HC4 · Promotion decision</text>
-      <text class="sub" x="115" y="1098" text-anchor="middle">A/B · shadow · reject · revise contract</text>
-      <path class="edge-h loop" d="M115 1110 V1140 H12 V180 H16" marker-end="url(#ah)"/>
-      <text class="lbl" x="130" y="1160" text-anchor="middle">SPEC_REVIEW returns to HC2/HC3 — never silently continues</text>
+      <!-- HC_CHAMPION · a human reads every hypothesis -->
+      <path class="edge" d="M440 962 V996" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="1000" width="300" height="52" rx="4"/>
+      <text x="440" y="1022" text-anchor="middle" font-weight="600">Champion review</text>
+      <text class="sub" x="440" y="1040" text-anchor="middle">vs the incumbent and prior champions · cohort deltas</text>
+      <path class="edge-h" d="M290 1026 H215" marker-end="url(#ah)"/>
+      <rect class="hc" x="20" y="1000" width="190" height="52" rx="4"/>
+      <text class="hc-t" x="115" y="1022" text-anchor="middle">HC_CHAMPION</text>
+      <text class="sub" x="115" y="1040" text-anchor="middle">continue · freeze · drop</text>
+      <path class="edge loop" d="M590 1026 H636 V738 H595" marker-end="url(#a)"/>
+      <text class="lbl" x="636" y="1108" text-anchor="middle" transform="rotate(90 636 1108)">continue → next hypothesis</text>
+
+      <!-- exactly one freeze -->
+      <path class="edge" d="M440 1052 V1086" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="1090" width="300" height="52" rx="4" stroke-width="2"/>
+      <text x="440" y="1112" text-anchor="middle" font-weight="600">Champion Freeze</text>
+      <text class="mono sub" x="440" y="1130" text-anchor="middle">FrozenChampion · immutable · exactly one</text>
+
+      <!-- QA phase 0 -->
+      <path class="edge-q" d="M440 1142 V1176" marker-end="url(#aq)"/>
+      <rect class="qa" x="290" y="1180" width="300" height="52" rx="4"/>
+      <text class="qa-t" x="440" y="1202" text-anchor="middle" font-weight="600">QA Phase 0 · Integrity</text>
+      <text class="sub" x="440" y="1220" text-anchor="middle">artifact loads, schema, reproduces logged validation</text>
+      <path class="edge-q" d="M590 1206 H700" marker-end="url(#aq)"/>
+      <rect class="dbx" x="705" y="1180" width="210" height="52" rx="4"/>
+      <text class="dbx-t" x="810" y="1202" text-anchor="middle">Integrity job</text>
+      <text class="sub" x="810" y="1220" text-anchor="middle">validation subset only · pyfunc load</text>
+      <path class="edge-q loop" d="M290 1218 H262 V1192 H285" marker-end="url(#aq)"/>
+      <text class="lbl" x="248" y="1252" text-anchor="start">INVALID_EXPERIMENT → fix plumbing, never the model · capped</text>
+
+      <!-- QA phase 1, behind the proxy-sanity gate -->
+      <path class="edge-q" d="M440 1232 V1266" marker-end="url(#aq)"/>
+      <rect class="qa" x="290" y="1270" width="300" height="64" rx="4"/>
+      <text class="qa-t" x="440" y="1290" text-anchor="middle" font-weight="600">QA Phase 1 · Holdout</text>
+      <text class="sub" x="440" y="1306" text-anchor="middle">first: does the offline metric track the product?</text>
+      <text class="sub" x="440" y="1324" text-anchor="middle">then: candidate vs incumbent, paired CI</text>
+      <path class="edge-q" d="M590 1302 H700" marker-end="url(#aq)"/>
+      <rect class="qa" x="705" y="1270" width="210" height="64" rx="4"/>
+      <text class="qa-t" x="810" y="1290" text-anchor="middle" font-weight="600">Holdout job</text>
+      <text class="sub" x="810" y="1306" text-anchor="middle">SplitGuard: qa only</text>
+      <text class="sub" x="810" y="1324" text-anchor="middle">first and only read</text>
+      <text class="lbl" x="248" y="1268" text-anchor="start">proxy fails → SPEC_REVIEW before candidates are read</text>
+
+      <!-- the conclusion, and the report a product owner reads -->
+      <path class="edge" d="M440 1334 V1364" marker-end="url(#a)"/>
+      <rect class="box" x="290" y="1368" width="300" height="52" rx="4"/>
+      <text x="440" y="1390" text-anchor="middle" font-weight="600">Conclusion + Experimentation Report</text>
+      <text class="sub" x="440" y="1408" text-anchor="middle">PASS · FAIL_HYPOTHESIS · SPEC_REVIEW — a negative result counts</text>
+      <path class="edge-d" d="M590 1394 H700" marker-end="url(#ad)"/>
+      <rect class="dbx" x="705" y="1368" width="210" height="52" rx="4"/>
+      <text class="dbx-t" x="810" y="1390" text-anchor="middle">Final MLflow run</text>
+      <text class="sub" x="810" y="1408" text-anchor="middle">model · QA metrics · lineage · report.html</text>
+      <path class="edge-h" d="M290 1394 H215" marker-end="url(#ah)"/>
+      <rect class="hc" x="20" y="1368" width="190" height="52" rx="4"/>
+      <text class="hc-t" x="115" y="1390" text-anchor="middle">HC4 · Promotion decision</text>
+      <text class="sub" x="115" y="1408" text-anchor="middle">A/B · shadow · reject · revise</text>
+      <path class="edge-h loop" d="M20 1394 H12 V180 H16" marker-end="url(#ah)"/>
+      <text class="lbl" x="248" y="1436" text-anchor="start">SPEC_REVIEW returns to HC2/HC3 — never silently continues</text>
     </svg>
-    <figcaption>Every arrow that crosses into Databricks is a job submitted as the service principal; every arrow into the Human lane is a checkpoint where the CLI pauses and waits. The QA split (red) is read exactly once, by the holdout job, after the champion is frozen.</figcaption>
+    <figcaption>Every arrow crossing into Databricks is a job on a tagged job cluster; every arrow into the Human lane is a checkpoint where the graph suspends and waits, on the campaign page or in a terminal. The QA split (red) is read exactly once, by the holdout job, after the champion is frozen. The autonomous band is one hypothesis wide: the Trainer loop runs unattended, but a human reads every hypothesis champion before the next hypothesis starts.</figcaption>
   </figure>
+
+  <h2>Two evaluation modes, one harness</h2>
+  <p style="color:var(--ink-2)">The contract's <code>evaluation_mode</code> decides what a unit of evaluation is. Everything downstream &mdash; the metrics, the paired comparison, the bootstrap, <code>SplitGuard</code>, the freeze &mdash; is the same code in both modes.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th><code>next_item</code></th><th><code>grouped_rerank</code></th></tr></thead>
+    <tbody>
+      <tr><td>A unit is</td><td>One user, at one point in their history</td><td>One <em>render</em> &mdash; one container shown to one user at one time</td></tr>
+      <tr><td>Candidates</td><td>Generated: <code>popularity</code>, <code>random</code>, <code>mixed</code> &mdash; <code>n</code> per unit</td><td><code>logged_impressions</code>: closed at what the container actually showed, so <code>n</code> never applies</td></tr>
+      <tr><td>Relevance</td><td>The next item the user touched</td><td>The conversion label on each impressed tile</td></tr>
+      <tr><td>Baseline</td><td>A model: <code>popularity</code>, <code>sasrec</code></td><td><code>logged_order</code> &mdash; the incumbent ranking itself. Beating it is the whole question</td></tr>
+      <tr><td><code>k</code></td><td>A reporting choice</td><td>The above-the-fold tile count. On CTV, 4</td></tr>
+      <tr><td>Position bias</td><td>Not applicable</td><td><code>relevance_weighting: pbm</code>. Per-client, per-slot examination propensities &theta; estimated on the <em>train split only</em>; each label becomes a gain of <code>label / max(&theta;, floor)</code>. Without it, copying the incumbent's order scores well for free</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="color:var(--ink-2);margin-top:12px">Metric <em>names</em> do not change between modes: <code>ndcg@4</code> is <code>ndcg@4</code>. The weighting is a contract-level fact stamped into <code>contract_hash</code>, so it cannot drift between the baseline, the candidates and QA.</p>
 
   <h2>Who may read which split</h2>
   <p style="color:var(--ink-2)">Enforced by <code>SplitGuard</code> inside the job, not by prompt. Train jobs receive an allow-list that physically excludes <code>qa</code>.</p>
@@ -258,36 +309,93 @@ ol.rules b{color:var(--ink);font-weight:600}
   <table>
     <thead><tr><th>Job role</th><th style="text-align:center"><span class="split s-train">train</span></th><th style="text-align:center"><span class="split s-val">validation</span></th><th style="text-align:center"><span class="split s-qa">qa</span></th><th>Used for</th></tr></thead>
     <tbody>
-      <tr><td>baseline</td><td class="c yes">read</td><td class="c yes">read</td><td class="c no">—</td><td>Reference point on the same ground truth</td></tr>
-      <tr><td>train (Trainer loop)</td><td class="c yes">fit</td><td class="c yes">select, early-stop</td><td class="c no">—</td><td>Architecture, features, hyperparameters, champion choice</td></tr>
-      <tr><td>qa_phase0</td><td class="c no">—</td><td class="c sub-yes">approved subset</td><td class="c no">—</td><td>Does the artifact reproduce its own logged behavior?</td></tr>
-      <tr><td>qa_phase1</td><td class="c no">—</td><td class="c no">—</td><td class="c yes">read once</td><td>Does the frozen champion generalize? Evidence, not a tuning signal</td></tr>
+      <tr><td>materialize</td><td class="c yes">write</td><td class="c yes">write</td><td class="c yes">write</td><td>Cuts all three splits once, at HC3, and estimates &theta; from train alone</td></tr>
+      <tr><td>baseline</td><td class="c yes">read</td><td class="c yes">read</td><td class="c no">&mdash;</td><td>The incumbent's number on the same ground truth</td></tr>
+      <tr><td>train (Trainer loop)</td><td class="c yes">fit</td><td class="c yes">select, early-stop</td><td class="c no">&mdash;</td><td>Features, hyperparameters, champion choice</td></tr>
+      <tr><td>qa_phase0</td><td class="c no">&mdash;</td><td class="c sub-yes">approved subset</td><td class="c no">&mdash;</td><td>Does the artifact reproduce its own logged behaviour?</td></tr>
+      <tr><td>qa_phase1</td><td class="c no">&mdash;</td><td class="c no">&mdash;</td><td class="c yes">read once</td><td>Does the frozen champion generalise? Evidence, not a tuning signal</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="color:var(--ink-2);margin-top:12px">QA Phase 1 reads one thing that is not a split: the external daily product series the contract names in <code>product_metric_source</code>. For the Latest For You campaign that was the dashboard's own <code>container_ctr_pct</code>, built from a different source table than our label &mdash; which is what makes the proxy check a real cross-source test rather than a tautology.</p>
+
+  <h2>What QA can say</h2>
+  <div class="grid g4">
+    <div class="tile verdict inv"><span class="eyebrow">Phase 0 only</span><h3 class="mono">INVALID_EXPERIMENT</h3><p>The artifact or evaluation path is broken. Fix the defect and rerun Phase 0 &mdash; features, hyperparameters and model choice stay untouched. Retries are capped.</p></div>
+    <div class="tile verdict pass"><span class="eyebrow">Phase 1</span><h3 class="mono">PASS</h3><p>Meets the acceptance criteria set before QA ran. Register as candidate; proceed to online A/B or shadow evaluation.</p></div>
+    <div class="tile verdict fail"><span class="eyebrow">Phase 1</span><h3 class="mono">FAIL_HYPOTHESIS</h3><p>Won on validation, did not generalise. Recorded as a finding. The same model's search is not reopened with QA feedback.</p></div>
+    <div class="tile verdict spec"><span class="eyebrow">Phase 1</span><h3 class="mono">SPEC_REVIEW</h3><p>Labels, population, candidates or metrics are wrong &mdash; or the proxy-sanity gate failed, meaning the offline metric does not track the product number even for the incumbent. Back to the human.</p></div>
+  </div>
+
+  <h2>The report a product owner reads</h2>
+  <p style="color:var(--ink-2)">Every number in the <code>ExperimentationReport</code> comes out of <code>Phase1Result</code>. The Planner writes the narrative around it and never the numbers. A losing campaign gets the same report as a winning one.</p>
+  <ol class="rules">
+    <li><b>Proxy sanity, first.</b> Spearman &rho; between the incumbent's daily offline metric and the external product series. Below <code>min_proxy_correlation</code>, or fewer than seven overlapping days, and the campaign is <code>SPEC_REVIEW</code> before a single candidate number is displayed.</li>
+    <li><b>The effect in product units.</b> Top-slot conversions per 1,000 renders, candidate against incumbent, with a confidence interval. Under <code>pbm</code> this is a self-normalised estimate whose incumbent value collapses to its own observed rate &mdash; so the incumbent's number in the report matches what the dashboard shows, and the candidate's is the counterfactual.</li>
+    <li><b>Where it regressed.</b> Paired cohort and segment deltas with intervals, and an explicit list of cohorts worse than the contract's guardrail.</li>
+    <li><b>What the weighting did.</b> &theta; per client &times; position, printed, so a reader can judge the correction rather than trust it.</li>
+    <li><b>What an online test would cost.</b> Baseline rate, offline effect size, MDE at 80&nbsp;% power, required renders, and days at the rail's own measured traffic.</li>
+    <li><b>What this cannot tell you.</b> Replay re-orders the incumbent's own candidate set, so it measures re-ranking and not better retrieval; the PBM comes from the incumbent's logs and not from randomisation; offline improvement is not causal lift.</li>
+  </ol>
+
+  <h2>Where things live</h2>
+  <div class="grid g3">
+    <div class="tile"><span class="eyebrow">MLflow</span><h3>Everything about a run</h3><p>Params, curves, validation and QA metrics, model artifacts, <code>result.json</code>, <code>conclusion.md</code> and <code>report.html</code>. Tagged with campaign, hypothesis, <code>contract_hash</code>, harness version, code version.</p></div>
+    <div class="tile"><span class="eyebrow">Delta tables</span><h3>Only the ground truth</h3><p>Materialised <code>split_train</code>, <code>split_validation</code>, <code>split_qa</code>, pinned by Delta version and a membership hash. In <code>grouped_rerank</code> a row is a render carrying its candidates, positions, labels and weights. Source tables are read, never copied per experiment.</p></div>
+    <div class="tile"><span class="eyebrow">Orchestrator state</span><h3>Just enough to resume</h3><p>Stage, approvals, hypothesis statuses, approved shapes, budget, run IDs, frozen champion reference. A SQLite checkpoint per campaign, keyed by campaign id; the campaign page and the CLI read the same rows.</p></div>
+  </div>
+
+  <h2>What a hypothesis can be</h2>
+  <p style="color:var(--ink-2)">Status is not decoration &mdash; <code>planner_select_hypothesis</code> only ever picks from <code>pending</code>, so these are the states that decide what runs.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Status</th><th>Set by</th><th>Means</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">pending</td><td>The Planner, once, after the baseline</td><td>Approved and not yet run. The only status selection will pick up.</td></tr>
+      <tr><td class="mono">infeasible</td><td>The graph, automatically</td><td>It asked for something outside the runtime vocabulary. Carries the reason, and never reaches selection. Cheaper than discovering it in a job.</td></tr>
+      <tr><td class="mono">abandoned</td><td>A human, at <code>HC_BACKLOG</code>, <code>HC_FEATURE</code> or <code>HC_CHAMPION</code></td><td>Struck deliberately with <code>drop</code>. A rewind does not resurrect it: a person meant it.</td></tr>
+      <tr><td class="mono">active</td><td>Selection</td><td>Mid-flight. A rewind returns it to <code>pending</code> and gives back its budget slot.</td></tr>
+      <tr><td class="mono">completed</td><td>The champion step</td><td>It produced a champion, win or lose.</td></tr>
     </tbody>
   </table>
   </div>
 
-  <h2>What QA can say</h2>
-  <div class="grid g4">
-    <div class="tile verdict inv"><span class="eyebrow">Phase 0 only</span><h3 class="mono">INVALID_EXPERIMENT</h3><p>The artifact or evaluation path is broken. Fix the defect and rerun Phase 0 — architecture, features, hyperparameters and model choice stay untouched.</p></div>
-    <div class="tile verdict pass"><span class="eyebrow">Phase 1</span><h3 class="mono">PASS</h3><p>Meets the acceptance criteria set before QA ran. Register as candidate; proceed to online A/B or shadow evaluation.</p></div>
-    <div class="tile verdict fail"><span class="eyebrow">Phase 1</span><h3 class="mono">FAIL_HYPOTHESIS</h3><p>Won on validation, did not generalize. Recorded as a finding. The same model's search is not reopened with QA feedback.</p></div>
-    <div class="tile verdict spec"><span class="eyebrow">Phase 1</span><h3 class="mono">SPEC_REVIEW</h3><p>Evidence that labels, population, candidates or metrics are wrong. Back to the human before anything in the spec or contract changes.</p></div>
+  <h2>Swapping an agent</h2>
+  <p style="color:var(--ink-2)">Each agent method is a pure function from context to one Pydantic schema. The prompt is swappable; the returned schema is the contract; <code>graph/routing.py</code> and the node assertions are what make a bad swap fail loudly instead of quietly producing a worse campaign. Models are named <code>provider:model_id</code> and built only in <code>src/amt/llm.py</code>.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Method</th><th>Prompt in <code>src/amt/agents/prompts/</code></th><th>Must return</th><th>Model from</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">ProblemSpecAgent.investigate</td><td class="mono">problem_spec_probe.md</td><td class="mono">ProbeRequest</td><td class="mono">AMT_PROBLEM_SPEC_MODEL</td></tr>
+      <tr><td class="mono">ProblemSpecAgent.draft_spec</td><td class="mono">problem_spec.md</td><td class="mono">ProblemSpec</td><td class="mono">AMT_PROBLEM_SPEC_MODEL</td></tr>
+      <tr><td class="mono">ProblemSpecAgent.draft_contract</td><td class="mono">evaluation_contract.md</td><td class="mono">EvaluationContractDraft</td><td class="mono">AMT_PROBLEM_SPEC_MODEL</td></tr>
+      <tr><td class="mono">PlannerAgent.propose_hypotheses</td><td class="mono">planner_hypotheses.md</td><td class="mono">HypothesisBacklog</td><td class="mono">AMT_PLANNER_MODEL</td></tr>
+      <tr><td class="mono">PlannerAgent.propose_feature_fit</td><td class="mono">planner_feature_fit.md</td><td class="mono">FeatureFitProposal</td><td class="mono">AMT_PLANNER_MODEL</td></tr>
+      <tr><td class="mono">PlannerAgent.build_plan</td><td class="mono">planner_plan.md</td><td class="mono">ExperimentPlan</td><td class="mono">AMT_PLANNER_MODEL</td></tr>
+      <tr><td class="mono">PlannerAgent.select_final_champion</td><td class="mono">planner_final_champion.md</td><td class="mono">FinalChampionSelection</td><td class="mono">AMT_PLANNER_MODEL</td></tr>
+      <tr><td class="mono">PlannerAgent.write_conclusion</td><td class="mono">planner_conclusion.md</td><td class="mono">ScientificConclusion</td><td class="mono">AMT_PLANNER_MODEL</td></tr>
+      <tr><td class="mono">TrainerAgent.propose_config</td><td class="mono">trainer_propose.md</td><td class="mono">ExperimentConfig</td><td class="mono">AMT_TRAINER_MODEL</td></tr>
+      <tr><td class="mono">TrainerAgent.interpret</td><td class="mono">trainer_interpret.md</td><td class="mono">TrainerInterpretation</td><td class="mono">AMT_TRAINER_MODEL</td></tr>
+      <tr><td class="mono">TrainerAgent.select_champion</td><td class="mono">trainer_champion.md</td><td class="mono">ChampionSelection</td><td class="mono">AMT_TRAINER_MODEL</td></tr>
+      <tr><td class="mono">QAAgent.triage_phase0</td><td class="mono">qa_phase0_triage.md</td><td class="mono">Phase0Triage</td><td class="mono">AMT_QA_MODEL</td></tr>
+      <tr><td class="mono">QAAgent.decide</td><td class="mono">qa_decision.md</td><td class="mono">QAAssessment</td><td class="mono">AMT_QA_MODEL</td></tr>
+    </tbody>
+  </table>
   </div>
-
-  <h2>Where things live</h2>
-  <div class="grid g3">
-    <div class="tile"><span class="eyebrow">MLflow</span><h3>Everything about a run</h3><p>Params, per-epoch curves, validation and QA metrics, model artifacts, <code>result.json</code>, the final report. Tagged with campaign, hypothesis, <code>contract_hash</code>, harness version, code version.</p></div>
-    <div class="tile"><span class="eyebrow">Delta tables</span><h3>Only the ground truth</h3><p>Materialized <code>split_train</code>, <code>split_validation</code>, <code>split_qa</code>, pinned by Delta version and a membership hash. Source tables are read, never copied per experiment.</p></div>
-    <div class="tile"><span class="eyebrow">Orchestrator state</span><h3>Just enough to resume</h3><p>Stage, approvals, current hypothesis, budget, run IDs, frozen champion reference. A SQLite checkpoint per campaign; <code>amt resume</code> picks up mid-loop.</p></div>
-  </div>
+  <p style="color:var(--ink-2);margin-top:12px">Three things a swap cannot do, because code and not the prompt decides them. It cannot widen the transform vocabulary: <code>runtime_vocabulary()</code> is rendered into the Planner's context and anything outside it lands <code>infeasible</code>. It cannot change an approved shape: <code>_bind_feature_fit</code> keeps the structural payload a human signed and takes only <code>booster_params</code> from the Trainer, recording the rejected ask. And it cannot upgrade a losing result: the conclusion's <code>recommendation</code> is clamped to the measured validation verdict, so prose may explain a loss but never promote it.</p>
 
   <h2>Rules enforced in code, not prose</h2>
   <ol class="rules">
     <li><b>One contract per campaign.</b> <code>contract_hash</code> is stamped at HC3; every node and every job asserts it before doing work.</li>
     <li><b>Splits are immutable.</b> Jobs read <code>VERSION AS OF</code> and verify row counts against the contract.</li>
     <li><b>Train jobs cannot see QA.</b> <code>SplitGuard</code> raises on any read outside the role's allow-list.</li>
+    <li><b>The backlog is written once.</b> After the baseline, approved at <code>HC_BACKLOG</code>; <code>planner_select_hypothesis</code> selects and never generates.</li>
+    <li><b>An approved shape is final.</b> <code>execute_training</code> refuses a config whose <code>feature_fit_hash</code> is not the approved one, and the Trainer's structural asks are clamped rather than bounced.</li>
+    <li><b>A human reads every hypothesis.</b> <code>HC_CHAMPION</code> interrupts once per hypothesis. The Trainer loop inside a hypothesis stays autonomous; the band between HC3 and HC4 does not.</li>
     <li><b>QA needs a freeze.</b> Routing refuses Phase 0 unless exactly one <code>FrozenChampion</code> exists; the Trainer cannot re-enter after freeze.</li>
-    <li><b>Same math for everyone.</b> A single versioned evaluation harness scores baseline, candidates and QA; QA loads the model through MLflow pyfunc, not the trainer's in-memory object.</li>
-    <li><b>Bounded loops.</b> The trainer stops at <code>max_iterations</code> or compute budget regardless of what the agent proposes; Phase 0 retries are capped at three.</li>
+    <li><b>The proxy is checked before the candidate.</b> A metric that does not track the product number for the ranker already in production cannot certify a new one.</li>
+    <li><b>Same math for everyone.</b> One versioned harness scores baseline, candidates and QA; QA loads the model through MLflow pyfunc, not the trainer's in-memory object.</li>
+    <li><b>Bounded loops.</b> The Trainer stops at <code>max_iterations</code> or the compute budget regardless of what the agent proposes, and a bit-identical retune reads as <code>no_op</code> and counts toward convergence.</li>
+    <li><b>Compute is attributable.</b> Every job cluster carries <code>amt</code>, <code>amt_campaign_id</code>, <code>amt_role</code> and <code>amt_hypothesis_id</code>, so a campaign's cost is a query against <code>system.billing.usage</code> rather than an estimate.</li>
   </ol>
 </div>

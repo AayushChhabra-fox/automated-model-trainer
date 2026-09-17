@@ -43,10 +43,10 @@ li{margin-bottom:5px}
 <nav aria-label="Sections">
   <a href="#setup"><span class="n">1</span>One-time setup</a>
   <a href="#run"><span class="n">2</span>Running a campaign</a>
-  <a href="#recover"><span class="n">3</span>Interruptions</a>
+  <a href="#recover"><span class="n">3</span>Rewind &amp; recovery</a>
   <a href="#mlflow"><span class="n">4</span>Reading MLflow</a>
   <a href="#refuse"><span class="n">5</span>What it refuses</a>
-  <a href="#cost"><span class="n">6</span>Cost guardrails</a>
+  <a href="#cost"><span class="n">6</span>Cost attribution</a>
   <a href="#family"><span class="n">7</span>Adding a model</a>
   <a href="#ref"><span class="n">8</span>Quick reference</a>
 </nav>
@@ -54,12 +54,13 @@ li{margin-bottom:5px}
 <main>
 <span class="eyebrow">Automated Model Trainer · operator guide</span>
 <h1>AMT Runbook</h1>
-<p class="lede">How to set up, start, supervise and close an experiment campaign. Four moments need you; the rest is the system's. Companion docs in the repo: <code>docs/SPEC.md</code>, <code>docs/PLAN.md</code>, <code>docs/campaign-map.html</code>.</p>
+<p class="lede">How to set up, start, supervise and close an experiment campaign. Seven moments need you; only the trainer loop inside a single hypothesis runs unattended. Companion docs in the repo: <code>docs/SPEC.md</code>, <code>docs/PLAN.md</code>, <code>docs/campaign-map.html</code>, and <code>docs/RUN_FYL_CAMPAIGN.md</code> for a worked campaign with the numbers to expect at each gate.</p>
+<div class="callout"><b>Two surfaces, one graph.</b> <code>amt web</code> is the primary one: a local Flask app where you read each checkpoint's document in full, answer it, watch progress, and rewind a gate you already approved. The CLI does everything the browser does and is what you use for scripting, <code>--mock</code> runs and CI. Neither is a cache of the other — both read state through <code>amt.monitor</code> and write it through the same <code>Command(resume=…)</code>, so they cannot disagree about a campaign.</div>
 
 <h2 id="setup"><span class="n">1</span>One-time setup</h2>
 
-<h3>1.1 Databricks service principal</h3>
-<p>AMT never runs as a user. Create or reuse a service principal and grant it:</p>
+<h3>1.1 Databricks identity</h3>
+<p>AMT normally runs as a service principal. Create or reuse one and grant it:</p>
 <div class="tw"><table>
 <thead><tr><th>Resource</th><th>Grant</th><th>Why</th></tr></thead>
 <tbody>
@@ -68,10 +69,11 @@ li{margin-bottom:5px}
 <tr><td><code>{catalog}.{schema}</code></td><td><code>USE SCHEMA</code>, <code>CREATE TABLE</code>, <code>MODIFY</code></td><td>Writes <code>split_train / validation / qa</code></td></tr>
 <tr><td>Volume <code>amt_artifacts</code></td><td><code>READ VOLUME</code>, <code>WRITE VOLUME</code></td><td>Wheel and JSON payload uploads</td></tr>
 <tr><td>Workspace folder <code>/Shared/amt</code></td><td><code>CAN MANAGE</code></td><td>MLflow experiments</td></tr>
-<tr><td>Cluster policy or existing cluster</td><td>create / attach</td><td>Job compute</td></tr>
+<tr><td>Cluster creation, or a policy allowing it</td><td>create</td><td>Per-run job clusters, which is the default</td></tr>
 <tr><td>UC model registry (optional)</td><td><code>CREATE MODEL</code> on schema</td><td><code>amt promote</code> on PASS</td></tr>
 </tbody></table></div>
-<p>Generate an OAuth secret for the principal under Workspace admin → Service principals → Secrets. Optional hardening: a second principal for QA jobs with <code>SELECT</code> on <code>split_qa</code> only (see <code>PLAN.md</code> §9; not wired by default).</p>
+<p>Generate an OAuth secret for the principal under Workspace admin → Service principals → Secrets. Running as yourself instead: set <code>DATABRICKS_TOKEN</code> to a PAT and it takes precedence over the OAuth pair, which is the quickest way onto source data a principal cannot reach yet. The PAT needs the <code>files</code> scope or Volume uploads fail with <code>does not have required scopes: files</code>. Optional hardening: a second principal for QA jobs with <code>SELECT</code> on <code>split_qa</code> only (see <code>PLAN.md</code> §9; not wired by default).</p>
+<p>Compute defaults to a <b>per-run job cluster</b>, and that is what makes cost attributable: tags are a property of a job cluster, so each run carries <code>amt</code>, <code>amt_campaign_id</code>, <code>amt_role</code> and <code>amt_hypothesis_id</code> into <code>system.billing.usage.custom_tags</code>. Job clusters are created in single-user mode so they can install the AMT wheel from a Unity Catalog volume. Pinning an existing all-purpose cluster still works and iterates faster, but see <a href="#cost">§6</a> for what it costs you.</p>
 
 <h3>1.2 Local environment</h3>
 <pre><code>git clone &lt;repo&gt; &amp;&amp; cd automated-model-trainer
@@ -87,14 +89,20 @@ cp .env.example .env      # then fill in the values below</code></pre>
 <tr><td><code>AMT_LLM_BASE_URL</code></td><td>some</td><td>Required for <code>huggingface</code> / <code>openai-compat</code> models; omit for hosted OpenAI and Anthropic</td></tr>
 <tr><td><code>AMT_CATALOG</code> / <code>AMT_SCHEMA</code></td><td>yes</td><td>Where splits are materialized</td></tr>
 <tr><td><code>AMT_VOLUME_PATH</code></td><td>yes</td><td><code>/Volumes/{catalog}/{schema}/amt_artifacts</code></td></tr>
-<tr><td><code>AMT_EXISTING_CLUSTER_ID</code></td><td>one of</td><td>Reuse a running cluster — fastest iteration</td></tr>
-<tr><td><code>AMT_SPARK_VERSION</code> / <code>AMT_NODE_TYPE_ID</code> / <code>AMT_NUM_WORKERS</code></td><td>one of</td><td>Or a per-run job cluster</td></tr>
+<tr><td><code>AMT_SPARK_VERSION</code> / <code>AMT_NODE_TYPE_ID</code> / <code>AMT_NUM_WORKERS</code></td><td>yes</td><td>The per-run job cluster. Prefer an ML runtime so the booster libraries are already present</td></tr>
+<tr><td><code>AMT_EXISTING_CLUSTER_ID</code></td><td>no</td><td>Pin an all-purpose cluster instead. Faster to iterate, but loses per-run cost attribution and bills at the All-Purpose rate</td></tr>
+<tr><td><code>AMT_MAX_CANDIDATE_ROWS</code></td><td>no</td><td>Default 50M — the candidate-row budget <code>HC_FEATURE</code> prices each shape against</td></tr>
 <tr><td><code>AMT_MLFLOW_EXPERIMENT_ROOT</code></td><td>no</td><td>Default <code>/Shared/amt</code></td></tr>
 <tr><td><code>AMT_*_MODEL</code></td><td>no</td><td>Per-agent model as <code>provider:model_id</code> — see 1.2.1</td></tr>
-<tr><td><code>AMT_CHECKPOINT_DB</code></td><td>no</td><td>Default <code>~/.amt/checkpoints.sqlite</code></td></tr>
+<tr><td><code>AMT_CHECKPOINT_DB</code></td><td>no</td><td>Default <code>~/.amt/checkpoints.sqlite</code>; the campaign list reads it directly</td></tr>
+<tr><td><code>AMT_REPORTS_DIR</code></td><td>no</td><td>Where <code>report.html</code> is written locally as well as to MLflow</td></tr>
 </tbody></table></div>
-<p>Smoke-check auth before anything else:</p>
-<pre><code>uv run python -c "from amt.databricks.client import get_client; print(get_client().current_user.me().user_name)"</code></pre>
+<p>Then check everything a campaign needs <em>before</em> it spends a cluster minute. MLflow reads credentials from the process environment rather than from <code>Settings</code>, so export <code>.env</code> in the shell you run <code>amt</code> from:</p>
+<pre><code>set -a &amp;&amp; . ./.env &amp;&amp; set +a
+uv run amt doctor --tables &lt;the tables your campaign will read&gt;
+uv run amt config</code></pre>
+<p><code>doctor</code> verifies auth, the warehouse, a writable artifact volume, the job-cluster spec against the node types this workspace actually offers, the MLflow experiment root, that every source table is readable, and one real structured-output round-trip against your LLM. Only failures exit non-zero; a <code>warn</code> is a finding you may accept, and it says what accepting it costs. Almost every "job died twenty minutes in" has an answer here.</p>
+<p><code>config</code> prints the resolved settings, masked, with the source of each value. Read the <b>source</b> column: an <code>AMT_*</code> variable exported in your shell silently shadows <code>.env</code>, and that column is the only thing that will tell you.</p>
 
 <h3>1.2.1 Choosing an LLM provider</h3>
 <p>AMT is provider-agnostic: the agents only need a chat model that can return structured output. Name each agent's model as <code>provider:model_id</code> and the orchestrator builds the right client. Nothing else in a campaign changes when you switch providers.</p>
@@ -117,9 +125,13 @@ AMT_QA_MODEL=huggingface:meta-llama/Llama-3.1-70B-Instruct</code></pre>
 
 <h3>1.3 Dry run — no Databricks, no LLM</h3>
 <pre><code>uv run amt start "Improve homepage row ranking" -c dryrun --mock
-uv run amt approve dryrun --mock     # HC2
-uv run amt approve dryrun --mock     # HC3 → autonomous → stops at HC4
-uv run amt report dryrun --mock
+uv run amt run   dryrun --mock       # drives every checkpoint inline</code></pre>
+<p>Or answer the gates one at a time, which is what a script would do:</p>
+<pre><code>uv run amt approve dryrun --mock     # HC2
+uv run amt approve dryrun --mock     # HC3
+uv run amt approve dryrun --mock     # HC_BACKLOG
+uv run amt approve dryrun --mock     # HC_CHAMPION → QA → stops at HC4
+uv run amt report  dryrun --mock
 uv run amt promote dryrun --mock</code></pre>
 <p>If this completes, the orchestrator is healthy. Everything after this point is configuration and data.</p>
 
@@ -129,6 +141,9 @@ uv run amt promote dryrun --mock</code></pre>
 
 <h2 id="run"><span class="n">2</span>Running a campaign</h2>
 <p>A campaign is one frozen question. Its id is also the LangGraph thread id and the MLflow experiment name, so pick something you can find later — <code>hp-rows-seq-2026q3</code>, not <code>test1</code>.</p>
+<pre><code>uv run amt web        # http://127.0.0.1:5000 — the campaign list, and `new campaign`</code></pre>
+<p>The campaign page is the monitor: the pending checkpoint at the top with its verbs, the document of record in full underneath, then the hypothesis table, the experiment history and a live progress log carrying each Databricks run URL. It refreshes every five seconds only while a runner is live, so a page showing a checkpoint never reloads under your cursor. No auth, by design — it binds to <code>127.0.0.1</code> and runs with your <code>.env</code>, exactly as the CLI does.</p>
+<p>Each step below gives the CLI equivalent, because the CLI is what you script.</p>
 
 <div class="step"><div class="num">2.1</div><div>
 <h3 style="margin-top:0">Start <span class="hc">HC1</span></h3>
@@ -142,7 +157,21 @@ uv run amt promote dryrun --mock</code></pre>
 <li>the current baseline, if one exists;</li>
 <li>constraints — latency, cold-start, fairness, catalog rules.</li>
 </ul>
-<p>The Problem Specification Agent probes the tables you name via read-only SQL (schema, volume, freshness, label availability, leakage), drafts a <code>ProblemSpec</code>, and the CLI stops at HC2. The budget flags are hard stops enforced by routing, not suggestions to the agent.</p>
+<p>The Problem Specification Agent probes the tables you name via read-only SQL (schema, volume, freshness, label availability, leakage), drafts a <code>ProblemSpec</code>, and stops at HC2. The budget flags are hard stops enforced by routing, not suggestions to the agent.</p>
+<h3>Which evaluation mode does your question need?</h3>
+<p>This is the single most important thing to get right in the problem statement. The contract's <code>evaluation_mode</code> records the choice, and both modes run through the same harness, the same paired bootstrap and the same freeze.</p>
+<div class="tw"><table>
+<thead><tr><th></th><th><code>next_item</code></th><th><code>grouped_rerank</code></th></tr></thead>
+<tbody>
+<tr><td>A unit is</td><td>One user at a point in their history</td><td>One <em>render</em> — one container shown to one user at one time, per the contract's <code>group_key</code></td></tr>
+<tr><td>Candidates</td><td>Generated: <code>popularity</code> / <code>random</code> / <code>mixed</code>, <code>n</code> per unit</td><td><code>logged_impressions</code> — what that render actually showed, so <code>n</code> never applies</td></tr>
+<tr><td>Relevance</td><td>The next item the user touched</td><td>The conversion label on each impressed tile</td></tr>
+<tr><td>Baseline</td><td>A model: <code>popularity</code>, <code>sasrec</code></td><td><code>logged_order</code> — the incumbent ranking itself</td></tr>
+<tr><td><code>k</code></td><td>A reporting choice</td><td>The above-the-fold tile count. On CTV, 4</td></tr>
+<tr><td>Answers</td><td>"What should we show this user next?"</td><td>"Does a new ranker beat the order this rail already ships, on its own metric, over a recent window?"</td></tr>
+</tbody></table></div>
+<div class="callout"><b>Two things follow from choosing <code>grouped_rerank</code>.</b> You are measuring <b>re-ordering, not retrieval</b> — the candidate set is the incumbent's, so the campaign cannot tell you whether better candidates exist. And position bias must be corrected or a ranker is rewarded for copying the incumbent: set <code>relevance_weighting: pbm</code> and materialisation estimates per-client, per-slot examination propensities from the train split alone, turning each label into a gain. Name the container, the page, the clients, the label column and the tile count in the problem statement — those are human-owned facts and the agent will not infer them.</div>
+<p>In both modes the harness computes <code>recall@k</code>, <code>ndcg@k</code>, <code>hitrate@k</code>, <code>mrr@k</code> and <code>coverage@k</code>, plus <code>auc</code>, <code>pr_auc</code>, <code>logloss</code> and <code>ece</code> as <b>secondary metrics only</b> — the primary metric has to be one that moves the surface, and the contract's own validation refuses a pointwise diagnostic as primary.</p>
 </div></div>
 
 <div class="step"><div class="num">2.2</div><div>
@@ -167,19 +196,64 @@ uv run amt reject  &lt;campaign&gt; -m "Label should be completion >= 70%, not a
 <li><b>Temporal boundaries</b> — train / validation / QA windows don't overlap; the QA window is recent enough to matter.</li>
 <li><b>Population eligibility and exclusions</b> — bots, internal users, minimum-interaction thresholds.</li>
 <li><b>Split references</b> — <code>delta_version</code>, <code>row_count</code>, <code>membership_hash</code> all present.</li>
+<li><b><code>evaluation_mode</code></b>, and if it is <code>grouped_rerank</code>: <code>group_key</code>, <code>position_column</code>, <code>label_column</code>, <code>label_positive_values</code>, <code>relevance_weighting</code> and the propensity floor. A wrong <code>group_key</code> here silently produces splits that look plausible and mean nothing.</li>
 <li><b>Metric definitions and <code>harness_version</code></b> — what you expect to report.</li>
-<li><b>Acceptance criteria</b> — the bar QA will hold the champion to. Set it now; it cannot move later.</li>
+<li><b><code>product_metric_source</code></b> — the external daily series QA will correlate against. Pick one built from a <em>different</em> source than your label, or the proxy check proves nothing.</li>
+<li><b>Acceptance criteria</b> — the bar QA will hold the champion to, including <code>min_proxy_correlation</code> and the cohort-regression guardrail. Set it now; it cannot move later.</li>
 </ol>
 <pre><code>uv run amt approve &lt;campaign&gt;</code></pre>
-<p>Approval stamps <code>contract_hash</code>. From here to HC4 the campaign is autonomous.</p>
+<p>Approval stamps <code>contract_hash</code>.</p>
 <div class="callout stop">Rejecting at HC3 re-materializes the splits. If you realize the contract is wrong <em>after</em> training has started, do not edit anything — start a new campaign. That is by design: the same comparison must never silently continue on changed ground truth.</div>
 </div></div>
 
 <div class="step"><div class="num">2.4</div><div>
-<h3 style="margin-top:0">Autonomous phase — what to watch</h3>
-<p>The CLI blocks while jobs run. In a second terminal:</p>
+<h3 style="margin-top:0">Approve the hypothesis backlog <span class="hc">HC_BACKLOG</span></h3>
+<p>After HC3 the baseline runs and the Planner writes the campaign's <em>whole</em> backlog at once, then stops. This is the only point at which you see every hypothesis before compute is spent on any of them, and the backlog decides how the budget is spent.</p>
+<p>In the browser this is a table with <code>keep</code> and <code>drop</code> boxes. From the CLI:</p>
+<pre><code>uv run amt show    &lt;campaign&gt;                  # the full backlog, not the panel preview
+uv run amt approve &lt;campaign&gt; --keep H1,H3     # order sets run order; everything else is dropped
+uv run amt approve &lt;campaign&gt; --drop H2        # or strike individually
+uv run amt reject  &lt;campaign&gt; -m "all four ignore that titles turn over daily"</code></pre>
+<p>Read each hypothesis against what this campaign can actually run:</p>
+<ol>
+<li><b>Testable here</b> — the design only needs the frozen splits, the contract's metrics, and transforms the <code>FeatureRecipe</code> can express.</li>
+<li><b>Falsifiable</b> — <code>falsification_criteria</code> names a result that would kill it, not a hedge.</li>
+<li><b>Worth the compute</b> — <code>estimated_cost_minutes</code> against <code>max_compute_minutes</code>, in the priority order you would want if the budget ran out early.</li>
+<li><b>Different from each other</b> — variations of one idea waste hypotheses.</li>
+</ol>
+<div class="callout">Prefer <code>drop</code> over <code>reject</code>. Dropping marks that hypothesis <code>abandoned</code> and keeps the rest intact; rejecting costs a full round trip through the Planner to redraft the whole backlog. Hypotheses asking for something the runtime cannot express arrive already marked <code>infeasible</code> with the reason — the Planner is given the literal transform vocabulary, candidate strategies and registry families as context, so that is caught before it costs a job.</div>
+<p>Approval is once per campaign: the backlog is written once, and <code>planner_select_hypothesis</code> selects from it without ever generating more.</p>
+</div></div>
+
+<div class="step"><div class="num">2.5</div><div>
+<h3 style="margin-top:0">Approve every feature/fit shape, once <span class="hc">HC_FEATURE</span></h3>
+<p>The gradient-boosting families (<code>xgboost_classifier</code>, <code>xgboost_reranker</code>, <code>lightgbm_classifier</code>, <code>lightgbm_reranker</code>) have no fixed input shape, so each needs a <code>FeatureRecipe</code> and a <code>FitSpec</code>. This gate shows you <b>every approved tabular hypothesis's shape at the same time</b>, before any job is submitted, and it interrupts <b>once per campaign</b> rather than once per hypothesis. If no surviving hypothesis is tabular, it does not interrupt at all.</p>
+<pre><code>uv run amt status  &lt;campaign&gt;               # awaiting HC_FEATURE
+uv run amt show    &lt;campaign&gt;               # every shape, in full
+uv run amt approve &lt;campaign&gt; --drop H3     # dropping a shape abandons its hypothesis
+uv run amt reject  &lt;campaign&gt; -m "H1 reads the labelled event; build it from history only"</code></pre>
+<p>Read the table in this order:</p>
+<ol>
+<li><b>Leakage.</b> Every feature must be computable at serving time from what is known before the decision. This is the one thing nothing downstream can catch for you.</li>
+<li><b>Estimated candidate rows.</b> A plausible-looking <code>n</code> against a large validation split is tens of millions of rows of feature building, and nothing else in the payload says so. Under <code>logged_impressions</code> the candidate set is closed at what the surface showed, so <code>n</code> is never applied and the gate says so instead of pricing it.</li>
+<li><b>Duplicate shapes.</b> A shape identical to another hypothesis's is annotated as such — two hypotheses with the same <code>feature_fit_hash</code> are one experiment run twice.</li>
+<li><b>The six <code>FitSpec</code> fields.</b> Objective, eval metric, rounds, early stopping, negative sampling, seed. Not <code>booster_params</code> — those are the Trainer's to change without asking.</li>
+</ol>
+<p>Approval stamps <code>feature_fit_hash</code> over the recipe plus the structural part of the <code>FitSpec</code>. Later iterations that only retune hyperparameters run without asking again, and <code>execute_training</code> refuses any config whose hash is not the approved one. <code>popularity</code>, <code>sasrec</code> and <code>logged_order</code> skip this checkpoint entirely.</p>
+<div class="callout">A Trainer that asks for a structural change is <b>clamped, not bounced</b>: the approved shape is kept, only its <code>booster_params</code> are taken, and the rejected ask is recorded and shown in <code>amt status</code>. The old behaviour sent the campaign back through this gate on the agent's initiative, which is how a review turned into a loop.</div>
+<div class="callout stop">If an approved shape turns out to be <em>unexecutable</em> — a recipe reading columns the split does not carry — do not reject something downstream. <a href="#recover">Rewind</a>.</div>
+</div></div>
+
+<div class="step"><div class="num">2.6</div><div>
+<h3 style="margin-top:0">The autonomous band, and the champion review <span class="hc">HC_CHAMPION</span></h3>
+<p>Between HC_FEATURE and QA the Trainer loop runs unattended <b>within one hypothesis</b>: propose a config, submit the job, interpret the result, iterate until it succeeds, plateaus, falsifies itself, repeats a config it already ran (<code>no_op</code>), or runs out of budget. Then it picks a champion for that hypothesis and <b>stops</b>.</p>
+<p>This gate is per hypothesis, not per iteration, and it is on by default. It shows this hypothesis's champion against the baseline and against every prior champion on the primary metric and the contract's secondaries, cohort deltas, the budget left, and the Planner's recommended next move. The delta column against the baseline is the rightmost one — on the campaign page the table scrolls horizontally with the metric names pinned.</p>
+<pre><code>uv run amt approve &lt;campaign&gt;                  # continue to the next hypothesis
+uv run amt approve &lt;campaign&gt; --drop H4,H5     # abandon hypotheses not worth the budget</code></pre>
+<p>In the browser there is also a <b>freeze</b> button: stop exploring, take the best champion so far and go to QA. Use it when a hypothesis has clearly answered the question and the remaining ones will not change the decision. <code>--no-gate-champions</code> disables the gate entirely, which is for rehearsal campaigns, not real ones.</p>
+<p>While jobs run, watch the progress log on the campaign page — each Databricks run URL lands there. From a second terminal:</p>
 <pre><code>uv run amt status &lt;campaign&gt;</code></pre>
-<p>Key fields: <code>stage</code>, <code>current_hypothesis_id</code>, <code>budget</code> (iterations used / max), size of <code>experiment_history</code>, <code>hypothesis_champions</code>, <code>frozen_champion</code>.</p>
+<p>Key fields: <code>stage</code>, <code>current_hypothesis_id</code>, <code>budget</code> (iterations used / max), size of <code>experiment_history</code>, <code>hypothesis_champions</code>, <code>frozen_champion</code>, and two worth reading closely: <code>gate_cycles</code>, flagged above two, which means you and the agent are disagreeing rather than converging; and any clamped structural ask, which means the Trainer wanted a shape you did not approve.</p>
 <p>In Databricks, open MLflow experiment <code>/Shared/amt/&lt;campaign&gt;</code>. Useful filters:</p>
 <pre><code>tags."amt.campaign_id" = '&lt;campaign&gt;' and tags."amt.role" = 'train'
 tags."amt.role" = 'qa1'</code></pre>
@@ -187,33 +261,52 @@ tags."amt.role" = 'qa1'</code></pre>
 <p>Typical wall-clock: baseline 5–10 min; each training iteration 10–40 min depending on cluster and model family; QA phases 5–15 min each.</p>
 </div></div>
 
-<div class="step"><div class="num">2.5</div><div>
-<h3 style="margin-top:0">Read the conclusion and decide <span class="hc">HC4</span></h3>
-<pre><code>uv run amt report &lt;campaign&gt;</code></pre>
-<p>Prints the Scientific Conclusion and the QA decision. Read it as a paper, not a scoreboard.</p>
+<div class="step"><div class="num">2.7</div><div>
+<h3 style="margin-top:0">QA, the report, and the decision <span class="hc">HC4</span></h3>
+<p>QA runs in two phases on the frozen champion. Phase 0 is integrity: the artifact loads through MLflow pyfunc, its schema matches, and it reproduces its own logged validation numbers. Phase 1 is the holdout — the only read of the QA split in the whole campaign.</p>
+<div class="callout stop"><b>Phase 1 checks the proxy before it looks at the candidate.</b> It computes the <em>incumbent's</em> offline primary metric on daily slices of the QA split and correlates it (Spearman ρ) with the external product series the contract named. If ρ is below <code>min_proxy_correlation</code>, or there are fewer than seven overlapping days, the campaign is <code>SPEC_REVIEW</code> with that reason and no candidate number is displayed. A metric that does not track the product number for the ranker already in production cannot certify a new one.</div>
+<pre><code>uv run amt report &lt;campaign&gt;          # conclusion + MLflow references</code></pre>
+<p>The campaign page shows the headline rows inline and links the full HTML report, which is also logged to the final MLflow run as <code>report.html</code>. Its order is deliberate: proxy sanity first, then the effect in <b>product units</b> (top-slot conversions per 1,000 renders, candidate against incumbent, with an interval), then the offline delta and its CI, then the cohort table with regressions called out, then what an online test would cost — MDE at 80&nbsp;% power, required renders, days at this surface's measured traffic. Every number comes from <code>Phase1Result</code>; the Planner writes the prose around them and never the numbers.</p>
+<p>Read the conclusion as a paper, not a scoreboard.</p>
 <div class="tw"><table>
 <thead><tr><th>QA decision</th><th>What it means</th><th>Your move</th></tr></thead>
 <tbody>
 <tr><td><span class="v pass">PASS</span></td><td>Frozen champion beat the baseline on the untouched QA split within the predefined criteria</td><td><code>amt promote</code> registers UC model <code>{catalog}.{schema}.amt_&lt;campaign&gt;</code> with alias <code>candidate</code>. Plan an online A/B or shadow test.</td></tr>
 <tr><td><span class="v fail">FAIL_HYPOTHESIS</span></td><td>Won on validation, did not generalize</td><td>Record it. Do <b>not</b> rerun the same hypothesis with tweaks against this QA split. New hypothesis → new campaign.</td></tr>
-<tr><td><span class="v spec">SPEC_REVIEW</span></td><td>QA surfaced evidence the labels, population or metrics are wrong</td><td>Fix the spec or contract in a <b>new</b> campaign; this one is closed.</td></tr>
-<tr><td><span class="v inv">INVALID_EXPERIMENT</span></td><td>Phase 0 failed three times on a technical defect</td><td>Fix the artifact / inference bug in code, then start a new campaign.</td></tr>
+<tr><td><span class="v spec">SPEC_REVIEW</span></td><td>The labels, population or metrics are wrong, or the proxy-sanity gate failed</td><td>Fix the spec or contract in a <b>new</b> campaign; this one is closed.</td></tr>
+<tr><td><span class="v inv">INVALID_EXPERIMENT</span></td><td>Phase 0 failed its capped number of times on a technical defect</td><td>Fix the artifact / inference bug in code, then start a new campaign.</td></tr>
 </tbody></table></div>
 <pre><code>uv run amt promote &lt;campaign&gt;                                   # PASS only
 uv run amt promote &lt;campaign&gt; --model-name main.recsys.homepage_ranker</code></pre>
 <p>A negative result is a finished campaign. The MLflow final run holds the report either way.</p>
+<div class="callout">The <code>recommendation</code> is clamped to the measured numbers: a champion that lost to the incumbent on validation reads <code>hypothesis_rejected</code> whatever the narrative says, and whatever QA did or did not manage to run. The prose may explain a loss; it cannot promote one.</div>
 </div></div>
 
-<h2 id="recover"><span class="n">3</span>Interruptions and recovery</h2>
+<h2 id="recover"><span class="n">3</span>Rewinding, interruptions and recovery</h2>
+<p>An approved gate is final by design — the Trainer is clamped to the shape a human signed, and nothing downstream can reopen it. When the approved document itself turns out to be <em>unexecutable</em>, the honest remedy is to go back and approve a different one rather than let the run proceed on a shape that trains on nothing. That is a rewind, available on the campaign page under <b>go back</b>, or:</p>
+<pre><code>uv run amt rewind &lt;campaign&gt; --to feature -m "the recipe reads columns the split does not carry"
+uv run amt rewind &lt;campaign&gt; --to backlog -m "every hypothesis assumes item identity carries over"
+uv run amt rewind &lt;campaign&gt; --to qa      -m "the pyfunc signature dropped the candidates"</code></pre>
+<div class="tw"><table>
+<thead><tr><th>Target</th><th>Re-enters at</th><th>Costs you</th></tr></thead>
+<tbody>
+<tr><td><code>backlog</code></td><td>after the baseline, into <code>planner_hypotheses</code></td><td>The backlog is redrafted. Mid-flight hypotheses return to <code>pending</code> and their budget slot comes back; <code>abandoned</code> ones stay abandoned, because a human struck them deliberately.</td></tr>
+<tr><td><code>feature</code></td><td>after the approved backlog, into <code>planner_feature_fit</code></td><td>The shapes are redrafted; the backlog stands.</td></tr>
+<tr><td><code>qa</code></td><td>after the freeze, into <code>qa_phase0</code></td><td>Only QA's own results are cleared. <b>The model is untouched</b> — this is for an evaluation-plumbing fix, and nothing about the artifact changes.</td></tr>
+</tbody></table></div>
+<p>Nothing that ran is erased: <code>experiment_history</code> and every MLflow run stay. Rewinding into training is refused once a champion is frozen — <code>--to qa</code>, or a new campaign, are the only honest paths then. The message is not paperwork; it is the feedback the Planner redrafts from.</p>
 <div class="tw"><table>
 <thead><tr><th>Situation</th><th>Action</th></tr></thead>
 <tbody>
-<tr><td>Laptop closed / CLI killed mid-run</td><td><code>uv run amt resume &lt;campaign&gt;</code>. State is checkpointed after every node; the in-flight Databricks job is re-polled or re-submitted.</td></tr>
+<tr><td>Laptop closed / CLI killed mid-run</td><td><code>uv run amt resume &lt;campaign&gt;</code>, or <b>pick it up</b> on the campaign page. State is checkpointed after every node; the in-flight Databricks job is re-polled or re-submitted.</td></tr>
 <tr><td>Waiting on you, but which checkpoint?</td><td><code>amt status</code> prints <code>awaiting HC*</code>.</td></tr>
 <tr><td>Databricks job failed (cluster, quota, OOM)</td><td>Fix the cause; <code>amt resume</code>. The trainer sees <code>status=failed</code> in the result and adapts (smaller batch, fewer layers). Failures count against the iteration budget.</td></tr>
 <tr><td>Auth error (<code>401</code>, <code>invalid_client</code>)</td><td>Rotate the SP secret, update <code>.env</code>, <code>amt resume</code>.</td></tr>
 <tr><td>Wheel upload fails</td><td>Check <code>AMT_VOLUME_PATH</code> exists and the SP has <code>WRITE VOLUME</code>.</td></tr>
-<tr><td>Phase 0 <code>INVALID_EXPERIMENT</code> once or twice</td><td>Normal — usually serialization or schema-signature. The system fixes plumbing and retries automatically; only three strikes is terminal.</td></tr>
+<tr><td>Phase 0 <code>INVALID_EXPERIMENT</code> once or twice</td><td>Normal — usually serialization or schema-signature. The system fixes plumbing and retries automatically; only the cap is terminal.</td></tr>
+<tr><td>A job dies on an argument the code should know</td><td>Only possible on a pinned all-purpose cluster, where wheel installs are cluster-scoped and accumulate: <code>uv run python scripts/clear_cluster_wheels.py $AMT_EXISTING_CLUSTER_ID</code>, then <code>amt resume</code>. Job clusters are per-run and cannot hit this.</td></tr>
+<tr><td>An approved recipe cannot execute</td><td><code>amt rewind &lt;campaign&gt; --to feature -m "&lt;why&gt;"</code>. Rejecting something downstream will not fix it.</td></tr>
+<tr><td>The web page says a campaign is already running</td><td>A second resume while one is live is refused rather than raced (HTTP 409). Wait for the runner, or read the progress log for what it is doing.</td></tr>
 <tr><td>You want to change the contract</td><td>You can't. <code>amt start</code> a new campaign.</td></tr>
 <tr><td>Checkpoint DB corrupted</td><td>Delete <code>~/.amt/checkpoints.sqlite</code>. The campaign is lost locally; every run remains in MLflow.</td></tr>
 </tbody></table></div>
@@ -226,46 +319,80 @@ uv run amt promote &lt;campaign&gt; --model-name main.recsys.homepage_ranker</co
 <tr><td><code>train</code></td><td>train, validation</td><td><code>val/&lt;primary&gt;</code>, <code>train/*</code>, <code>val/cohort/*</code>, per-epoch curves, <code>config.yaml</code></td></tr>
 <tr><td><code>qa0</code></td><td>validation subset</td><td><code>checks</code> in <code>result.json</code>; <code>reproduction_deltas</code> should be ≈ 0</td></tr>
 <tr><td><code>qa1</code></td><td>qa</td><td><code>paired_deltas.&lt;metric&gt;.{mean, ci_low, ci_high, frac_improved}</code> — a CI excluding 0 is the claim</td></tr>
-<tr><td><code>final</code></td><td>—</td><td><code>conclusion.md</code>, <code>problem_spec.json</code>, <code>evaluation_contract.json</code>, QA metrics</td></tr>
+<tr><td><code>final</code></td><td>—</td><td><code>conclusion.md</code>, <code>report.html</code>, <code>problem_spec.json</code>, <code>evaluation_contract.json</code>, QA metrics</td></tr>
 </tbody></table></div>
-<p>Metric names: <code>recall@k</code>, <code>ndcg@k</code>, <code>hitrate@k</code>, <code>mrr@k</code>, <code>coverage@k</code> with k ∈ {5, 10, 20} by default. Cohort keys look like <code>history_length=cold_start</code>, <code>recency=recency_0_7d</code>.</p>
+<p>Metric names: <code>recall@k</code>, <code>ndcg@k</code>, <code>hitrate@k</code>, <code>mrr@k</code>, <code>coverage@k</code>, with <code>k</code> taken from the contract's own metric list — <code>{5, 10, 20}</code> only when the contract does not say otherwise, so a contract asking for <code>ndcg@4</code> is scored at 4. <code>auc</code>, <code>pr_auc</code>, <code>logloss</code> and <code>ece</code> appear as secondaries. Cohort keys look like <code>history_length=cold_start</code>, <code>client_name=ROKU</code>.</p>
+<div class="callout"><b>Mind the prefix.</b> The harness emits bare metric names; the training job logs them under <code>val/</code>, and both spellings reach campaign state. Anything comparing a contract's <code>primary_metric</code> against a stored metrics dict goes through <code>amt.schemas.run_result.metric_value</code>, which accepts either — a raw <code>.get</code> looks like it works and silently returns nothing for half its inputs.</div>
 
 <h2 id="refuse"><span class="n">5</span>Things the system will refuse to do</h2>
 <p>Enforced in code — routing, <code>SplitGuard</code>, hash assertions. If you hit one, the fix is a new campaign, not a workaround.</p>
 <ul>
 <li>Run a training or baseline job with <code>qa</code> in its allowed splits.</li>
+<li>Train a booster family on a feature/fit shape you did not approve, or on one that changed after you approved it. A structural ask from the Trainer is clamped, not honoured.</li>
+<li>Generate new hypotheses after the backlog is approved, or select one that is <code>abandoned</code> or <code>infeasible</code>.</li>
+<li>Report a candidate's QA numbers when the proxy-sanity gate failed.</li>
+<li>Recommend promotion for a champion that lost to the incumbent on validation.</li>
 <li>Run QA before exactly one <code>FrozenChampion</code> exists.</li>
-<li>Re-enter the trainer after freeze.</li>
+<li>Re-enter the trainer after freeze, including by rewinding.</li>
 <li>Continue after <code>contract_hash</code> changes.</li>
 <li>Exceed <code>--max-iterations</code> or <code>--max-compute-minutes</code>.</li>
-<li>Retry Phase 0 more than three times.</li>
+<li>Retry Phase 0 past its cap.</li>
 </ul>
 
-<h2 id="cost"><span class="n">6</span>Cost and time guardrails</h2>
+<h2 id="cost"><span class="n">6</span>Cost: attribution and guardrails</h2>
+<p>Every job cluster AMT submits carries four tags: <code>amt=true</code>, <code>amt_campaign_id</code>, <code>amt_role</code> (<code>materialize</code> / <code>baseline</code> / <code>train</code> / <code>qa0</code> / <code>qa1</code> / <code>final</code>) and <code>amt_hypothesis_id</code>. They land in <code>system.billing.usage.custom_tags</code>, so "what did this campaign cost" and "which hypothesis burned the budget" are queries rather than estimates. See <code>.cursor/rules/databricks-cost.md</code> for the query and the dashboard.</p>
+<h3>What pinning a cluster costs</h3>
+<p>Tags are a property of a job cluster. A pinned all-purpose cluster (<code>AMT_EXISTING_CLUSTER_ID</code>) can carry a static <code>amt=true</code> cluster tag — that part works, and its cost stays attributable to AMT — but <code>amt_campaign_id</code>, <code>amt_role</code> and <code>amt_hypothesis_id</code> vary per run and have nowhere to live, so per-campaign and per-hypothesis attribution is gone. It also bills at the All-Purpose rate: measured on this workspace, $0.650/DBU against $0.200 for Jobs Compute — <b>3.25&times;</b>, not the "about twice" rule of thumb. Over the last 30 days the pinned cluster bought a third of the compute for the same money, and it is the untaggable third.</p>
+<p>Set against that: a warm cluster skips the ~4.5 minutes a job cluster spends starting, which over a twelve-iteration campaign is about an hour. <code>amt doctor</code> reads the cluster and tells you which trade-offs apply, including two that are easy to miss — a runtime without <code>-ml-</code> in its name pip-installs the booster libraries on every run and those installs accumulate cluster-scoped, and a single-node cluster is fine for the boosters but slow for materialisation, which pushes the whole source table through Spark.</p>
+<p>Pin one while you are learning the gates. Leave it unset for a campaign whose cost you want to attribute, and because materialisation wants the workers.</p>
+<h3>Other guardrails</h3>
 <ul>
-<li>Start with <code>--max-hypotheses 1 --max-iterations 4</code> and an existing small cluster; widen once the first campaign completes.</li>
-<li>Prefer <code>AMT_EXISTING_CLUSTER_ID</code> during development — job-cluster spin-up adds ~5 min per run.</li>
+<li>Start with <code>--max-hypotheses 1 --max-iterations 4</code>; widen once the first campaign completes.</li>
 <li>The Problem Specification Agent is capped at <code>AMT_MAX_PROBE_STEPS</code> (default 8) SQL probes.</li>
+<li><code>AMT_MAX_CANDIDATE_ROWS</code> (default 50M) is the budget <code>HC_FEATURE</code> prices each shape against.</li>
 <li>Per-agent models can be downgraded — or pointed at a cheaper provider — via <code>AMT_*_MODEL</code> for rehearsal campaigns.</li>
 </ul>
 
-<h2 id="family"><span class="n">7</span>Adding a model family</h2>
+<h2 id="family"><span class="n">7</span>Model families, and adding one</h2>
+<div class="tw"><table>
+<thead><tr><th>Family</th><th>Kind</th><th>Input shape</th></tr></thead>
+<tbody>
+<tr><td><code>popularity</code></td><td>Baseline, trailing frequency</td><td>Fixed in code</td></tr>
+<tr><td><code>logged_order</code></td><td>Baseline for <code>grouped_rerank</code>: returns the candidates in the order the surface showed them, i.e. the incumbent</td><td>Fixed in code</td></tr>
+<tr><td><code>sasrec</code></td><td>Sequence model</td><td>Fixed in code</td></tr>
+<tr><td><code>xgboost_classifier</code></td><td>Pointwise <code>binary:logistic</code></td><td>Declared per hypothesis by an approved <code>FeatureRecipe</code></td></tr>
+<tr><td><code>xgboost_reranker</code></td><td>Pairwise <code>rank:pairwise</code></td><td>Same, grouped by <code>group_key</code></td></tr>
+<tr><td><code>lightgbm_classifier</code></td><td>Pointwise <code>binary</code></td><td>Same</td></tr>
+<tr><td><code>lightgbm_reranker</code></td><td><code>lambdarank</code></td><td>Same, grouped by <code>group_key</code></td></tr>
+</tbody></table></div>
+<p>The four booster families share one runtime (<code>src/amt/jobs/models/tabular_common.py</code>) that executes the recipe: it builds <code>(history, candidate)</code> rows from the frozen splits plus the item-attribute tables the recipe names, fits the booster, and at serving time scores candidates through the same feature builder. Under <code>logged_impressions</code> the candidates come off the render row rather than being generated, so the recipe's <code>column</code> transform reaches impression-row fields — position, item metadata, user context — directly, and most first-campaign features need no new transform kind.</p>
+<p>Each family declares its own dependency (<code>requires_pip</code> in the registry) and the executor passes it as a per-run library install, which is what makes job clusters viable. Locally they need <code>xgboost</code> / <code>lightgbm</code> from the <code>jobs</code> extra (on macOS also <code>brew install libomp</code>); the unit tests skip when the native library cannot load.</p>
+<h3>Adding a family</h3>
 <ol>
-<li>Implement <code>fit / recommend / pyfunc wrapper</code> in <code>src/amt/jobs/models/&lt;family&gt;.py</code>, following <code>sasrec.py</code>.</li>
-<li>Register it in <code>src/amt/jobs/models/registry.py</code>.</li>
-<li>The Planner reads the registry to know what exists; allow it in the ExperimentPlan's permitted changes.</li>
+<li>Implement <code>fit / recommend / pyfunc wrapper</code> in <code>src/amt/jobs/models/&lt;family&gt;.py</code> following <code>sasrec.py</code> — or, for a recipe-driven family, a thin module over <code>tabular_common.fit_family</code> following <code>lightgbm_reranker.py</code>.</li>
+<li>Register it in <code>src/amt/jobs/models/registry.py</code>, with <code>requires_pip</code> if it needs a library, and in <code>RECIPE_FAMILIES</code> plus <code>amt.schemas.feature_recipe.TABULAR_FAMILIES</code> if it takes a recipe.</li>
+<li>The Planner reads the registry to know what exists, so no prompt edit is needed for it to be proposable.</li>
 <li>Unit-test under <code>tests/unit/test_models.py</code>; no Spark or Databricks needed.</li>
 <li>Change nothing in the harness — evaluation is model-agnostic by design.</li>
 </ol>
 
 <h2 id="ref"><span class="n">8</span>Quick reference</h2>
-<pre><code>amt start   "&lt;problem&gt;" -c &lt;id&gt; [--max-iterations N] [--max-hypotheses N] [--max-compute-minutes M] [--mock]
-amt approve &lt;id&gt;                    # HC2 / HC3
-amt reject  &lt;id&gt; -m "&lt;feedback&gt;"    # HC2 / HC3 — re-runs the stage with your note
+<pre><code>amt web                             # the primary surface: list, campaign pages, reports
+amt doctor [--tables a,b]           # everything a campaign needs, before it spends a minute
+amt config                          # resolved settings, masked, with the source of each value
+
+amt start   "&lt;problem&gt;" -c &lt;id&gt; [--max-iterations N] [--max-hypotheses N] [--max-compute-minutes M] [--mock]
+amt run     &lt;id&gt;                    # drive every checkpoint inline from one terminal
+amt list                            # every campaign in the local checkpoint database
 amt status  &lt;id&gt;                    # compact state + which checkpoint is pending
+amt show    &lt;id&gt; [--key K]          # the checkpoint document in full, not the preview
+amt approve &lt;id&gt; [--keep H1,H3] [--drop H2]
+amt reject  &lt;id&gt; -m "&lt;feedback&gt;"    # re-runs the stage with your note
 amt resume  &lt;id&gt;                    # continue after crash / kill
+amt rewind  &lt;id&gt; --to backlog|feature|qa -m "&lt;why&gt;"
 amt report  &lt;id&gt;                    # Scientific Conclusion + MLflow refs (HC4)
 amt promote &lt;id&gt; [--model-name &lt;uc.name&gt;]   # HC4 decision; registers on PASS
 amt demo seed [--users N --items N]</code></pre>
+<p><code>approve</code> answers whichever gate is pending: HC2, HC3, HC_BACKLOG, HC_FEATURE, HC_CHAMPION or HC4. Add <code>--mock</code> to any of these for an offline dry run with no Databricks and no LLM.</p>
 </main>
 </div>

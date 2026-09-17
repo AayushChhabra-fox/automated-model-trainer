@@ -1,0 +1,65 @@
+---
+description: How AMT compute is tagged and how to attribute its cost in system.billing
+globs: src/amt/executor/*.py,src/amt/databricks/*.py,scripts/*.py
+alwaysApply: false
+---
+
+# Attributing AMT compute cost
+
+Every job cluster AMT submits is tagged in `DatabricksExecutor._cost_tags`, so cost is a
+query rather than an estimate. Cost monitor:
+[dbx-cost-monitor](https://product-api-insights.dashboard.fox/pnr-exp-analyzer/dbx-cost-monitor).
+
+| Tag | Value |
+|---|---|
+| `amt` | always `"true"` — every AMT cluster |
+| `amt_campaign_id` | the campaign id, which is also the LangGraph thread id and MLflow experiment name |
+| `amt_role` | `materialize` \| `baseline` \| `train` \| `qa0` \| `qa1` \| `final` |
+| `amt_hypothesis_id` | set on `train` runs; absent on campaign-level roles |
+
+## The query
+
+`system.billing.usage` carries the tags and the DBU quantity; prices live separately in
+`system.billing.list_prices`, so a cost in currency needs the join.
+
+```sql
+SELECT u.custom_tags['amt_campaign_id']  AS campaign,
+       u.custom_tags['amt_role']         AS role,
+       u.custom_tags['amt_hypothesis_id'] AS hypothesis,
+       SUM(u.usage_quantity)                         AS dbus,
+       SUM(u.usage_quantity * p.pricing.default)     AS usd
+FROM system.billing.usage u
+JOIN system.billing.list_prices p
+  ON u.sku_name = p.sku_name
+ AND u.usage_end_time BETWEEN p.price_start_time
+                          AND coalesce(p.price_end_time, TIMESTAMP '2999-01-01')
+WHERE u.custom_tags['amt'] = 'true'
+  AND u.usage_date >= current_date() - INTERVAL 30 DAYS
+GROUP BY ALL
+ORDER BY usd DESC
+```
+
+Drop the `hypothesis` column for a per-campaign total; filter `role = 'train'` to see what
+the trainer loop cost as against materialization and QA.
+
+## What breaks attribution, in this workspace's own numbers
+
+Tags are a property of a **job** cluster. When `AMT_EXISTING_CLUSTER_ID` pins an all-purpose
+cluster, only that cluster's own static tags reach billing: a hand-added `amt=true` does keep
+the cost attributable to AMT, but `amt_campaign_id`, `amt_role` and `amt_hypothesis_id` vary
+per run and have nowhere to live, so all three grouping columns above go null.
+
+Grouping the same 30 days by `sku_name` instead (measured 2026-09-17):
+
+| SKU | Per-run tags | DBUs | USD | USD/DBU |
+|---|---|---|---|---|
+| `ENTERPRISE_ALL_PURPOSE_COMPUTE` | no | 3.14 | 2.04 | **0.650** |
+| `ENTERPRISE_JOBS_COMPUTE` | yes | 10.12 | 2.02 | **0.200** |
+
+All-Purpose is **3.25× the rate**, so the pinned cluster bought a third of the compute for the
+same money — and the more expensive half is the half nothing can attribute. Prefer this
+measured ratio to the "about twice" rule of thumb.
+
+`amt doctor` reads the pinned cluster and reports this as a warning, not a failure: a warm
+cluster skips the ~4.5 minutes a job cluster spends starting, which is a real trade while you
+are iterating. Leave it unset for any campaign whose cost you intend to report.
